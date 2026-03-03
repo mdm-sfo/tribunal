@@ -451,21 +451,42 @@ they watched the argument unfold in real time."""
 def _slugify_briefing(briefing: str, max_words: int = 5) -> str:
     """Extract a short topical slug from the briefing text.
 
-    Takes the first sentence (or first ``max_words`` words), lowercases,
-    strips non-alphanumeric characters, and joins with hyphens.
-    Common question prefixes ("should we", "what is the best") are
-    stripped so the slug focuses on the topic, not the framing.
+    Skips generic headers (e.g. "Tribunal Briefing", "Task") and looks
+    for the first sentence with real topical content.  Common question
+    prefixes ("should we", "what is the best") are stripped so the slug
+    focuses on the topic, not the framing.
     Returns an empty string if nothing usable remains.
     """
-    # Grab the first meaningful line (skip blank lines / markdown headers)
-    first_line = ""
+    # Generic/meta headers that don't describe the actual topic
+    _SKIP_HEADERS = {
+        "tribunal briefing", "briefing", "task", "context",
+        "deliverable", "task type", "overview", "background",
+        "summary", "introduction", "question",
+    }
+
+    # Collect candidate lines, prioritizing "Question:" lines which
+    # tend to be the most topical part of a briefing.
+    question_line = ""
+    candidates: list[str] = []
     for line in briefing.strip().splitlines():
         stripped = line.strip().lstrip("#").strip()
-        if stripped:
-            first_line = stripped
-            break
-    if not first_line:
+        if not stripped:
+            continue
+        # Skip lines that are just generic section headers
+        if stripped.lower().rstrip(":") in _SKIP_HEADERS:
+            continue
+        # Skip markdown bold-only labels like "**Question:**"
+        label = re.sub(r'[*_`:\s]', '', stripped).lower()
+        if label in _SKIP_HEADERS:
+            continue
+        # Prefer lines that start with "Question:" — they're the real topic
+        if re.match(r'^\*{0,2}question\*{0,2}\s*:', stripped, re.IGNORECASE):
+            question_line = re.sub(r'^\*{0,2}question\*{0,2}\s*:\s*', '', stripped, flags=re.IGNORECASE)
+        candidates.append(stripped)
+    if not candidates and not question_line:
         return ""
+
+    first_line = question_line if question_line else candidates[0]
     # Take first sentence (split on . ? !) then first N words
     sentence = re.split(r'[.?!]', first_line)[0].strip()
     cleaned = re.sub(r'[^a-z0-9\s]', '', sentence.lower()).strip()
@@ -473,20 +494,43 @@ def _slugify_briefing(briefing: str, max_words: int = 5) -> str:
     prefixes = [
         "should we use ", "should we ", "should i use ", "should i ",
         "what is the best way to ", "what is the best approach to ",
+        "what is the best approach for ", "what is the best method to ",
         "what is the best ", "what are the best ",
         "what is the ", "what are the ", "what is ", "what are ",
         "is it better to use ", "is it better to ",
         "how should we ", "how should i ", "how do we ", "how do i ",
-        "how to ", "can we ", "can i ",
+        "how to ", "how can we ", "how can i ",
+        "can we ", "can i ", "can you ",
         "write a ", "write an ", "create a ", "create an ",
         "review this ", "review the ", "review our ",
         "compare ", "evaluate ",
+        "a home user has ", "a home user with ", "a home user ",
+        "a user has ", "a user with ", "a user ",
+        "the user has ", "the user wants to ", "the user ",
+        "i have ", "i want to ", "i need to ", "i would like to ",
+        "we have ", "we want to ", "we need to ",
+        "given that ", "assuming ", "considering ",
+        "has ", "with ",
     ]
     for prefix in prefixes:
         if cleaned.startswith(prefix):
             cleaned = cleaned[len(prefix):]
             break
     words = cleaned.split()
+    # Remove stopwords and "tribunal" (avoid dup with session-id prefix)
+    _STOPWORDS = {
+        "tribunal", "a", "an", "the", "of", "to", "in", "on", "for",
+        "is", "are", "was", "were", "be", "been", "being",
+        "each", "every", "all", "any", "some", "our", "my", "your",
+        "their", "its", "this", "that", "these", "those",
+        "and", "or", "but", "with", "from", "by", "at", "as",
+        "into", "through", "during", "before", "after",
+        "has", "have", "had", "do", "does", "did",
+        "will", "would", "could", "should", "may", "might",
+        "wants", "want", "need", "needs",
+        "set", "up", "get", "got",
+    }
+    words = [w for w in words if w not in _STOPWORDS]
     slug = "-".join(words[:max_words])
     # Cap total length to keep directory names sane
     return slug[:60] if slug else ""
@@ -1344,11 +1388,22 @@ human would understand cold.
 
 ## Recommended Outcome
 
-The consensus recommendation from the deliberation. Write this as a concrete,
-actionable paragraph that someone could hand to an engineer and say "build this."
-Include the key architectural decisions, specific tools or approaches chosen,
-and any quantitative parameters the council agreed on. This is NOT a summary
-of who said what — it is THE ANSWER the council produced.
+The recommendation as determined by the JUDICIAL VERDICT — not your own opinion.
+You MUST faithfully represent what the judge(s) concluded:
+- If the verdict is ACCEPT, state the accepted advocate's position.
+- If the verdict is SYNTHESIZE, state the synthesis exactly as the judge described
+  it — including ALL elements from ALL advocates the judge combined. Do not drop
+  components the judge included, even if you personally disagree.
+- If the verdict is REMAND, state that the matter was remanded and summarize the
+  judge's concerns.
+
+Write this as a concrete, actionable paragraph that someone could hand to an
+engineer and say "build this." Include the key architectural decisions, specific
+tools or approaches chosen, and any quantitative parameters. This is NOT a summary
+of who said what — it is THE ANSWER the judge(s) produced.
+
+CRITICAL: Do NOT re-adjudicate the case. Your job is to clearly communicate the
+judicial decision, not to override it with your own analysis of the record.
 
 ## How We Got Here
 
@@ -1384,8 +1439,16 @@ purely analytical, evaluative, or opinion-seeking (e.g., "compare X vs Y",
 ## Dissenting Opinions
 
 If the record includes any formal dissenting opinions, summarize each one here.
+These are dissents AGAINST THE JUDICIAL VERDICT described in "Recommended Outcome"
+above. Since you faithfully reported the verdict, the dissent should clearly
+contrast with that recommendation — explain what the dissenter would do differently
+and why.
+
 For each dissent:
 - Name the dissenter by BOTH alias and real model name
+- State SPECIFICALLY how their position differs from the judicial verdict (the
+  Recommended Outcome above). Be concrete: "The verdict recommends X + Y, but the
+  dissenter argues Y is unnecessary because..."
 - State the core of their disagreement in 2-3 sentences
 - Note the strongest evidence they cited that the majority did not adequately address
 
