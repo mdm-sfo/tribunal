@@ -77,14 +77,20 @@ After parsing, you MUST use the AskUserQuestion tool to confirm depth before
 proceeding. Present the auto-selected or parsed depth as the recommended option,
 with alternatives. Example:
 
+Since AskUserQuestion only supports 4 options, use these exact options (the user
+can always type a different depth in the "Other" field):
+
 ```
 Question: "What depth should this tribunal run at?"
 Options:
-  - "THOROUGH — 3-4 advocates, 3 judges, 3 debate rounds (~$3, 8-15 min)" (Recommended)
-  - "RIGOROUS — 3-4 advocates, 4 judges, 5 debate rounds (~$5, 15-25 min)"
+  - "{RECOMMENDED_DEPTH} (Recommended)" — include cost/time estimate
+  - "THOROUGH — 3-4 advocates, 3 judges, 3 rounds (~$3, 8-15 min)"
   - "NUCLEAR — 5 advocates, 6 judges, 7 rounds + checkpoint (~$15, 45-75 min)"
   - "QUICK — 2 advocates, no judges, no debate (~$0.10, 1-2 min)"
 ```
+
+NUCLEAR must ALWAYS appear as an option — never omit it. If your recommended
+depth is THOROUGH, replace the duplicate with RIGOROUS or EXHAUSTIVE.
 
 Also ask about audio generation:
 
