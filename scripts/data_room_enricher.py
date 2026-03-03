@@ -353,46 +353,129 @@ def _build_legal_exposure(company_name: str, ticker: str) -> Optional[str]:
     return None
 
 
+# ── Perplexity research (general web search) ───────────────────────────────
+
+def _build_research_room(briefing: str, api_key: str) -> Optional[str]:
+    """
+    Use Perplexity Sonar Pro to gather current, cited data relevant to the
+    briefing topic. Returns factual grounding — not opinions or analysis
+    (that's the advocates' job).
+    """
+    try:
+        r = requests.post(
+            "https://api.perplexity.ai/chat/completions",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": "sonar-pro",
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are a research assistant preparing a factual data room "
+                            "for a panel of expert analysts. Your job is to gather current, "
+                            "verifiable facts, data points, statistics, timelines, and recent "
+                            "developments relevant to the topic below. "
+                            "DO NOT provide opinions, analysis, or recommendations. "
+                            "DO provide: specific numbers, dates, named sources, regulatory "
+                            "status, market data, and recent news. "
+                            "Format as a bulleted list organized by sub-topic. "
+                            "Include source URLs where available. "
+                            "Keep it under 800 words."
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": (
+                            f"Gather current factual data relevant to this question:\n\n"
+                            f"{briefing}\n\n"
+                            f"Focus on data that would help experts argue different positions "
+                            f"on this topic. Include data that supports AND challenges the "
+                            f"premise. Today's date: {date.today().isoformat()}"
+                        ),
+                    },
+                ],
+                "max_tokens": 2000,
+                "temperature": 0.1,
+            },
+            timeout=30,
+        )
+        r.raise_for_status()
+        data = r.json()
+        content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+        if not content.strip():
+            return None
+
+        # Extract citations if available
+        citations = data.get("citations", [])
+        lines = ["## Research Room — Current Data\n"]
+        lines.append(content.strip())
+        if citations:
+            lines.append("\n**Sources:**")
+            for i, url in enumerate(citations[:10], 1):
+                lines.append(f"{i}. {url}")
+        lines.append("\n*Source: Perplexity Sonar Pro — web search as of today.*")
+        lines.append("\n---\n")
+        return "\n".join(lines)
+
+    except Exception:
+        return None
+
+
 # ── Public entry point ──────────────────────────────────────────────────────
 
 def enrich_briefing(briefing: str) -> str:
     """
-    Detect a stock ticker, route to the right data provider, and prepend
-    a Data Room block. Returns the original briefing unchanged on any failure.
+    Enrich the briefing with a data room before advocate dispatch.
+
+    Two enrichment layers (both run independently, both are optional):
+    1. Stock data room — if a ticker is detected, pull financials
+    2. Research room — Perplexity web search for current facts on any topic
+
+    Returns the original briefing unchanged on any failure.
     """
+    sections = []
+
+    # Layer 1: Stock-specific data room (if ticker detected)
     result = _extract_ticker(briefing)
-    if not result:
+    if result:
+        raw_ticker, symbol, region = result
+        stock_room: Optional[str] = None
+
+        if region == "eu":
+            api_key = os.environ.get("BAVEST_API_KEY", "")
+            if api_key:
+                stock_room = _build_bavest_room(symbol, api_key)
+        elif region == "us":
+            api_key = os.environ.get("MASSIVE_API_KEY", "")
+            if api_key:
+                stock_room = _build_massive_room(raw_ticker, api_key)
+        elif region == "jp":
+            api_key = os.environ.get("JQUANTS_API_KEY", "")
+            if api_key:
+                stock_room = _build_jquants_room(raw_ticker, api_key)
+
+        if stock_room:
+            # Append legal exposure
+            company_name = _extract_company_name(briefing, raw_ticker)
+            legal = _build_legal_exposure(company_name, raw_ticker)
+            if legal:
+                if stock_room.endswith("---\n"):
+                    stock_room = stock_room[:-4].rstrip() + f"\n{legal}\n\n---\n"
+                else:
+                    stock_room += f"\n{legal}\n"
+            sections.append(stock_room)
+
+    # Layer 2: Perplexity research room (always attempted)
+    pplx_key = os.environ.get("PERPLEXITY_API_KEY", "")
+    if pplx_key:
+        research = _build_research_room(briefing, pplx_key)
+        if research:
+            sections.append(research)
+
+    if not sections:
         return briefing
 
-    raw_ticker, symbol, region = result
-    data_room: Optional[str] = None
-
-    if region == "eu":
-        api_key = os.environ.get("BAVEST_API_KEY", "")
-        if api_key:
-            data_room = _build_bavest_room(symbol, api_key)
-
-    elif region == "us":
-        api_key = os.environ.get("MASSIVE_API_KEY", "")
-        if api_key:
-            data_room = _build_massive_room(raw_ticker, api_key)
-
-    elif region == "jp":
-        api_key = os.environ.get("JQUANTS_API_KEY", "")
-        if api_key:
-            data_room = _build_jquants_room(raw_ticker, api_key)
-
-    if not data_room:
-        return briefing
-
-    # Append legal exposure (no API key needed — CourtListener is free)
-    company_name = _extract_company_name(briefing, raw_ticker)
-    legal = _build_legal_exposure(company_name, raw_ticker)
-    if legal:
-        # Insert before trailing separator
-        if data_room.endswith("---\n"):
-            data_room = data_room[:-4].rstrip() + f"\n{legal}\n\n---\n"
-        else:
-            data_room += f"\n{legal}\n"
-
-    return data_room + briefing
+    return "".join(sections) + briefing
