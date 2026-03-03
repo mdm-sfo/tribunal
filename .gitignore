@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+*.pyo
+conclave-sessions/
+tribunal-sessions/
+.env
+=4.0

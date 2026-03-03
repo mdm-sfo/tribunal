@@ -1,0 +1,20 @@
+# The Tribunal — Python Dependencies
+# Install: pip install -r requirements.txt
+
+# Core runtime (REQUIRED)
+litellm>=1.40.0            # Multi-model LLM routing (Together AI, Anthropic, OpenAI, Google, Fireworks)
+tenacity>=8.0.0            # Retry logic for judge model API calls (Cerebras, Together AI)
+
+# PDF generation (optional — session summary PDF output)
+# If not installed, the orchestrator still works; PDF step is skipped gracefully.
+reportlab>=4.0
+
+# NLI validation server (optional — GPU host only, not needed for normal use)
+# Uncomment these if setting up the NLI server on a GPU machine:
+# torch>=2.0.0
+# transformers>=4.35.0
+# fastapi>=0.104.0
+# uvicorn>=0.24.0
+
+# TTS pipeline (optional — audio generation)
+# No Python packages required — uses direct ElevenLabs HTTP API + ffmpeg binary
