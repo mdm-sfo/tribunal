@@ -478,4 +478,14 @@ def enrich_briefing(briefing: str) -> str:
     if not sections:
         return briefing
 
-    return "".join(sections) + briefing
+    disclaimer = (
+        "# Data Room\n\n"
+        "*The following data was gathered automatically before this deliberation. "
+        "It may or may not be relevant to the question. Use it where genuinely "
+        "helpful, ignore it where it isn't. Do not anchor on this data or treat "
+        "it as defining the scope of the question. Your own knowledge and reasoning "
+        "should drive your analysis — the Data Room is supplementary context, not "
+        "the answer.*\n\n"
+    )
+
+    return disclaimer + "".join(sections) + briefing

@@ -66,6 +66,14 @@ Your job is to produce the BEST possible response to the task below. Other exper
 received the same task independently. Your submission will be anonymized and evaluated
 by impartial judges on The Bench.
 
+## Data Room Notice
+The briefing may include a Data Room with pre-gathered research, financial data,
+legal cases, or web search results. This data is provided as OPTIONAL CONTEXT —
+it may or may not be relevant to the question. Do not anchor on it. Do not assume
+the Data Room defines the scope of the question. Use it where genuinely helpful,
+ignore it where it isn't, and draw on your own knowledge and reasoning beyond it.
+The Data Room is a starting point, not the answer.
+
 ## Submission Format
 
 Structure your response as:
