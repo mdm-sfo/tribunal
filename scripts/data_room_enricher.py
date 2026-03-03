@@ -566,11 +566,6 @@ def enrich_briefing(briefing: str) -> str:
         if research:
             sections.append(research)
 
-    # Layer 3: Legal room — recent U.S. case law (always attempted, free API)
-    legal_room = _build_legal_room(briefing)
-    if legal_room:
-        sections.append(legal_room)
-
     if not sections:
         return briefing
 
