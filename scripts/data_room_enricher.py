@@ -353,6 +353,97 @@ def _build_legal_exposure(company_name: str, ticker: str) -> Optional[str]:
     return None
 
 
+def _build_legal_room(briefing: str) -> Optional[str]:
+    """
+    Search CourtListener for recent U.S. court opinions relevant to the
+    briefing topic. Extracts key noun phrases and searches broadly —
+    not limited to company names or tickers.
+    """
+    # Extract plausible search terms: 2-4 word capitalized phrases,
+    # quoted phrases, or key nouns from the briefing
+    terms = []
+
+    # Quoted phrases
+    quoted = re.findall(r'"([^"]{3,50})"', briefing)
+    terms.extend(quoted[:2])
+
+    # Capitalized multi-word phrases (proper nouns, organizations, acts)
+    caps = re.findall(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\b', briefing)
+    terms.extend(caps[:3])
+
+    # If we still have nothing, grab the longest non-stopword sequences
+    if not terms:
+        stopwords = {
+            "the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
+            "have", "has", "had", "do", "does", "did", "will", "would", "could",
+            "should", "may", "might", "shall", "can", "need", "must", "of", "in",
+            "to", "for", "with", "on", "at", "from", "by", "about", "as", "into",
+            "through", "during", "before", "after", "above", "below", "between",
+            "and", "but", "or", "nor", "not", "so", "yet", "both", "either",
+            "neither", "each", "every", "all", "any", "few", "more", "most",
+            "other", "some", "such", "no", "only", "own", "same", "than", "too",
+            "very", "just", "because", "if", "when", "where", "how", "what",
+            "which", "who", "whom", "this", "that", "these", "those", "i", "we",
+            "you", "he", "she", "it", "they", "me", "us", "him", "her", "them",
+            "my", "our", "your", "his", "its", "their",
+        }
+        words = [w for w in re.findall(r'\b[a-zA-Z]{3,}\b', briefing)
+                 if w.lower() not in stopwords]
+        # Take the most distinctive-looking words
+        if len(words) >= 2:
+            terms.append(" ".join(words[:3]))
+
+    if not terms:
+        return None
+
+    cutoff = (date.today() - timedelta(days=3 * 365)).strftime("%Y-%m-%d")
+    all_cases = []
+
+    for term in terms[:3]:
+        try:
+            r = requests.get(
+                "https://www.courtlistener.com/api/rest/v4/search/",
+                params={
+                    "q": term,
+                    "type": "o",
+                    "order_by": "dateFiled desc",
+                    "page_size": 5,
+                    "filed_after": cutoff,
+                },
+                headers={"Accept": "application/json"},
+                timeout=8,
+            )
+            results = r.json().get("results", [])
+            all_cases.extend(results)
+        except Exception:
+            continue
+
+    if not all_cases:
+        return None
+
+    # Deduplicate by case name
+    seen = set()
+    unique = []
+    for c in all_cases:
+        name = c.get("caseName", "")
+        if name not in seen:
+            seen.add(name)
+            unique.append(c)
+
+    unique = unique[:8]
+
+    if not unique:
+        return None
+
+    lines = ["## Legal Room — Recent U.S. Case Law\n"]
+    for c in unique:
+        court = c.get("court_citation_string") or c.get("court", "")
+        lines.append(f"- *{c['caseName']}*  |  {court}  |  {c['dateFiled']}")
+    lines.append("\n*Source: CourtListener — U.S. federal + state courts, last 3 years.*")
+    lines.append("\n---\n")
+    return "\n".join(lines)
+
+
 # ── Perplexity research (general web search) ───────────────────────────────
 
 def _build_research_room(briefing: str, api_key: str) -> Optional[str]:
@@ -474,6 +565,11 @@ def enrich_briefing(briefing: str) -> str:
         research = _build_research_room(briefing, pplx_key)
         if research:
             sections.append(research)
+
+    # Layer 3: Legal room — recent U.S. case law (always attempted, free API)
+    legal_room = _build_legal_room(briefing)
+    if legal_room:
+        sections.append(legal_room)
 
     if not sections:
         return briefing
