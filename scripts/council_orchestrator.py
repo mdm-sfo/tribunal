@@ -573,10 +573,58 @@ def generate_session_id(briefing: Optional[str] = None) -> str:
     return f"tribunal-{ts}"
 
 
-def create_session_dir(base_dir: str, session_id: str) -> Path:
-    session_dir = Path(base_dir) / session_id
-    session_dir.mkdir(parents=True, exist_ok=True)
-    return session_dir
+class SessionDir:
+    """Organized session output directory.
+
+    Top-level:
+        session-summary.md/pdf  — THE canonical deliverable
+        briefing.md             — the original question
+
+    Subdirectories:
+        submissions/    — advocate sealed submissions
+        deliberation/   — challenges, debates, claim verification, stability
+        judicial/       — judge opinions, dissents, coherence flags
+        narrative/      — play-by-play, debrief
+        meta/           — council-log.json, alias maps, final-output.md
+    """
+
+    def __init__(self, root: Path):
+        self.root = root
+        self.submissions = root / "submissions"
+        self.deliberation = root / "deliberation"
+        self.judicial = root / "judicial"
+        self.narrative = root / "narrative"
+        self.meta = root / "meta"
+        # Create all subdirectories
+        for d in (self.submissions, self.deliberation,
+                  self.judicial, self.narrative, self.meta):
+            d.mkdir(parents=True, exist_ok=True)
+
+    def __truediv__(self, other: str) -> Path:
+        """Allow sdir / 'filename' for top-level files."""
+        return self.root / other
+
+    def __str__(self) -> str:
+        return str(self.root)
+
+    def resolve(self) -> Path:
+        return self.root.resolve()
+
+    def iterdir(self):
+        """Iterate all files recursively for counting."""
+        return self.root.rglob("*")
+
+    def glob(self, pattern: str):
+        return self.root.glob(pattern)
+
+    def rglob(self, pattern: str):
+        return self.root.rglob(pattern)
+
+
+def create_session_dir(base_dir: str, session_id: str) -> SessionDir:
+    root = Path(base_dir) / session_id
+    root.mkdir(parents=True, exist_ok=True)
+    return SessionDir(root)
 
 
 # ---------------------------------------------------------------------------
@@ -654,7 +702,7 @@ def run_advocate_phase(
     # This is NOT sent to the judges or included in the advocate roster.
     # It exists solely as a verifiable pre-commitment.
     if sealed_submission:
-        (session_dir / "sealed-hypothesis.md").write_text(
+        (session_dir.submissions / "sealed-hypothesis.md").write_text(
             f"# Sealed Pre-Registration (Host Agent)\n\n"
             f"This hypothesis was registered BEFORE the deliberation began.\n"
             f"It is not included in the advocate submissions seen by the judges.\n\n"
@@ -671,12 +719,12 @@ def run_advocate_phase(
 
     # Write individual submissions (anonymized)
     for resp in good:
-        path = session_dir / f"submission-{resp.alias.lower()}.md"
+        path = session_dir.submissions / f"submission-{resp.alias.lower()}.md"
         path.write_text(f"# Submission: {resp.alias}\n\n{resp.content}\n")
 
     # Write alias map (revealed only in debrief)
     alias_map = {r.alias: {"model": r.display_name, "provider": r.provider} for r in good}
-    (session_dir / "alias-map.json").write_text(json.dumps(alias_map, indent=2))
+    (session_dir.meta / "alias-map.json").write_text(json.dumps(alias_map, indent=2))
 
     return responses
 
@@ -764,7 +812,7 @@ def run_challenge_phase(
         for cr in successful_responses(challenge_responses):
             # Alias format is "Challenge-Advocate-X" — extract advocate alias
             adv_alias = cr.alias.replace("Challenge-", "")
-            path = session_dir / f"challenge-by-{adv_alias.lower()}.md"
+            path = session_dir.deliberation / f"challenge-by-{adv_alias.lower()}.md"
             path.write_text(f"# Challenges by {adv_alias}\n\n{cr.content}\n")
 
     good_challenges = successful_responses(challenge_responses)
@@ -1014,7 +1062,7 @@ def run_debate_phase(
                 parts = debate_resp.alias.split("-", 2)  # ['Debate', 'R3', 'Advocate-A']
                 adv_alias = parts[2] if len(parts) > 2 else debate_resp.alias
                 latest_positions[adv_alias] = debate_resp.content or ""
-                path = session_dir / f"debate-round-{actual_round}-{adv_alias.lower()}.md"
+                path = session_dir.deliberation / f"debate-round-{actual_round}-{adv_alias.lower()}.md"
                 path.write_text(
                     f"# Debate Round {actual_round}: {adv_alias}\n\n"
                     f"{debate_resp.content}\n"
@@ -1031,7 +1079,7 @@ def run_debate_phase(
 
     # Write position stability report
     stability_report = build_position_stability_report(advocate_responses, all_rounds)
-    (session_dir / "position-stability.md").write_text(stability_report)
+    (session_dir.deliberation / "position-stability.md").write_text(stability_report)
     progress.info("Position stability scorecard written")
 
     return all_rounds
@@ -1152,7 +1200,7 @@ def run_cardinal_phase(
     # Write individual judgments
     good_cardinals = successful_responses(cardinal_responses)
     for resp in good_cardinals:
-        path = session_dir / f"judgment-{resp.alias.lower()}.md"
+        path = session_dir.judicial / f"judgment-{resp.alias.lower()}.md"
         path.write_text(f"# Judicial Opinion: {resp.alias}\n\n{resp.content}\n")
 
     # Write judge alias map
@@ -1160,7 +1208,7 @@ def run_cardinal_phase(
         r.alias: {"model": r.display_name, "provider": r.provider, "role": r.role}
         for r in cardinal_responses
     }
-    (session_dir / "cardinal-alias-map.json").write_text(json.dumps(cardinal_alias_map, indent=2))
+    (session_dir.meta / "cardinal-alias-map.json").write_text(json.dumps(cardinal_alias_map, indent=2))
 
     # Check for REMAND verdicts
     should_remand = False
@@ -1237,7 +1285,7 @@ def check_verdict_coherence(
             )
             warnings.append(f"{resp.alias}: ranked {rank1_advocate} #1 but accepted {accepted_advocate}")
             # Append flag to judgment file AND in-memory content
-            jpath = session_dir / f"judgment-{resp.alias.lower()}.md"
+            jpath = session_dir.judicial / f"judgment-{resp.alias.lower()}.md"
             if jpath.exists():
                 jpath.write_text(jpath.read_text() + flag)
             resp.content = (resp.content or "") + flag
@@ -1270,7 +1318,7 @@ def check_verdict_coherence(
                 warnings.append(
                     f"{resp.alias}: ranked {rank1_advocate} #1 but rejected all their elements in synthesis"
                 )
-                jpath = session_dir / f"judgment-{resp.alias.lower()}.md"
+                jpath = session_dir.judicial / f"judgment-{resp.alias.lower()}.md"
                 if jpath.exists():
                     jpath.write_text(jpath.read_text() + flag)
                 resp.content = (resp.content or "") + flag
@@ -1290,7 +1338,7 @@ def check_verdict_coherence(
             "verdict but should be considered by downstream consumers "
             "(summary writer, human reader).\n"
         )
-        (session_dir / "coherence-flags.md").write_text(report)
+        (session_dir.judicial / "coherence-flags.md").write_text(report)
 
     return warnings
 
@@ -1346,7 +1394,7 @@ def run_fresh_eyes_phase(
     )
 
     if resp.status == "success":
-        (session_dir / "fresh-eyes-review.md").write_text(
+        (session_dir.judicial / "fresh-eyes-review.md").write_text(
             f"# Fresh Eyes Review\n\n{resp.content}\n"
         )
         progress.info(f"Fresh Eyes review complete ({resp.elapsed:.1f}s)")
@@ -1505,7 +1553,7 @@ def run_dissent_phase(
     for resp in successful_responses(dissent_responses):
         # Alias format: "Dissent-Advocate-A" → extract advocate alias
         adv_alias = resp.alias.replace("Dissent-", "")
-        path = session_dir / f"dissent-{adv_alias.lower()}.md"
+        path = session_dir.judicial / f"dissent-{adv_alias.lower()}.md"
         path.write_text(
             f"# Dissenting Opinion: {adv_alias}\n\n{resp.content}\n"
         )
@@ -1758,11 +1806,11 @@ def generate_session_summary(
 
     # Load identity reveals
     alias_map = {}
-    if (session_dir / "alias-map.json").exists():
-        alias_map = json.loads((session_dir / "alias-map.json").read_text())
+    if (session_dir.meta / "alias-map.json").exists():
+        alias_map = json.loads((session_dir.meta / "alias-map.json").read_text())
     cardinal_alias_map = {}
-    if (session_dir / "cardinal-alias-map.json").exists():
-        cardinal_alias_map = json.loads((session_dir / "cardinal-alias-map.json").read_text())
+    if (session_dir.meta / "cardinal-alias-map.json").exists():
+        cardinal_alias_map = json.loads((session_dir.meta / "cardinal-alias-map.json").read_text())
 
     # Build identity reveal table for the LLM
     identity_lines = ["## Identity Reveal"]
@@ -1895,8 +1943,8 @@ def generate_session_summary(
         f"Advocates: {len(good_advocates)} | Judges: {n_judges} | "
         f"Cost: ${cost:.4f} | Time: {minutes}m {seconds:02d}s**\n"
         f"*Full logs: `tribunal-sessions/{session_id}/` | "
-        f"Audit trail: `final-output.md` | "
-        f"Narrative: `play-by-play.md`*\n\n"
+        f"Audit trail: `meta/final-output.md` | "
+        f"Narrative: `narrative/play-by-play.md`*\n\n"
         f"---\n\n"
     )
 
@@ -2077,7 +2125,7 @@ def generate_play_by_play(
     # Save both narratives regardless of vote
     for nr in good_narrators:
         tag = "qwen" if "qwen" in nr.alias.lower() else "deepseek"
-        (session_dir / f"play-by-play-{tag}.md").write_text(
+        (session_dir.narrative / f"play-by-play-{tag}.md").write_text(
             f"# Tribunal Play-by-Play ({nr.alias})\n\n{nr.content}\n"
         )
         progress.info(f"  {nr.alias} narrative generated ({nr.elapsed:.1f}s)")
@@ -2086,7 +2134,7 @@ def generate_play_by_play(
         # Only one succeeded — that one wins by default
         winner = good_narrators[0]
         progress.info(f"Only {winner.alias} succeeded — wins by default.")
-        (session_dir / "play-by-play.md").write_text(
+        (session_dir.narrative / "play-by-play.md").write_text(
             f"# Tribunal Play-by-Play\n\n"
             f"*Narrator: {winner.alias} (sole survivor — other narrator failed)*\n\n"
             f"{winner.content}\n"
@@ -2142,7 +2190,7 @@ def generate_play_by_play(
         progress.info(f"Judicial vote: {winner_tag} narrative wins.")
 
         # Save vote
-        (session_dir / "narrator-vote.md").write_text(
+        (session_dir.narrative / "narrator-vote.md").write_text(
             f"# Narrator Vote (Judge: {voter_model.display_name})\n\n"
             f"{vote_resp.content}\n"
         )
@@ -2150,7 +2198,7 @@ def generate_play_by_play(
         progress.warn(f"Narrator vote failed ({vote_resp.error}) — defaulting to Qwen.")
 
     # Write the winner as the canonical play-by-play
-    (session_dir / "play-by-play.md").write_text(
+    (session_dir.narrative / "play-by-play.md").write_text(
         f"# Tribunal Play-by-Play\n\n"
         f"*Narrator: {winner.alias} (selected by judicial vote)*\n\n"
         f"{winner.content}\n"
@@ -2274,12 +2322,12 @@ def write_debrief(
 
     # Load alias maps
     alias_map = {}
-    if (session_dir / "alias-map.json").exists():
-        alias_map = json.loads((session_dir / "alias-map.json").read_text())
+    if (session_dir.meta / "alias-map.json").exists():
+        alias_map = json.loads((session_dir.meta / "alias-map.json").read_text())
 
     cardinal_alias_map = {}
-    if (session_dir / "cardinal-alias-map.json").exists():
-        cardinal_alias_map = json.loads((session_dir / "cardinal-alias-map.json").read_text())
+    if (session_dir.meta / "cardinal-alias-map.json").exists():
+        cardinal_alias_map = json.loads((session_dir.meta / "cardinal-alias-map.json").read_text())
 
     lines = [
         "# Tribunal Debrief Report",
@@ -2306,8 +2354,8 @@ def write_debrief(
         if good_dissents:
             dissenter_names = [r.alias.replace('Dissent-', '') for r in good_dissents]
             lines.append(f"**{len(good_dissents)} dissenting opinion(s)** filed by: {', '.join(dissenter_names)}.")
-        if (session_dir / "play-by-play.md").exists():
-            lines.append("A play-by-play narrative of the debate is available in `play-by-play.md`.")
+        if (session_dir.narrative / "play-by-play.md").exists():
+            lines.append("A play-by-play narrative of the debate is available in `narrative/play-by-play.md`.")
 
     # Panel composition
     lines.extend(["", "### Advocate Panel", "",
@@ -2380,7 +2428,7 @@ def write_debrief(
     lines.extend(["", "---", "",
         f"*Generated by The Tribunal v0.5.0 — session logs in `{session_dir}/`*"])
 
-    (session_dir / "debrief.md").write_text("\n".join(lines))
+    (session_dir.narrative / "debrief.md").write_text("\n".join(lines))
 
 
 def write_council_log(
@@ -2430,7 +2478,7 @@ def write_council_log(
             for r in phase_resps
         ]
 
-    (session_dir / "council-log.json").write_text(json.dumps(log_data, indent=2))
+    (session_dir.meta / "council-log.json").write_text(json.dumps(log_data, indent=2))
 
 
 # ---------------------------------------------------------------------------
@@ -2465,8 +2513,9 @@ def main():
     # Generate session (use original briefing for slug — before enrichment)
     session_id = args.session_id or generate_session_id(briefing_text)
     if args.session_dir:
-        session_dir = Path(args.session_dir)
-        session_dir.mkdir(parents=True, exist_ok=True)
+        override_root = Path(args.session_dir)
+        override_root.mkdir(parents=True, exist_ok=True)
+        session_dir = SessionDir(override_root)
     else:
         session_dir = create_session_dir(config.log_dir, session_id)
     progress = Progress(session_id, config.depth.name)
@@ -2534,7 +2583,7 @@ def main():
             )
             if verification_result:
                 claim_verification = verification_result
-                (session_dir / "claim-verification.md").write_text(verification_result)
+                (session_dir.deliberation / "claim-verification.md").write_text(verification_result)
                 progress.info(f"Claim verification brief generated ({len(verification_result)} chars)")
             else:
                 progress.info("Claim verification: skipped (no Perplexity API key or no result)")
@@ -2619,7 +2668,7 @@ def main():
 
                 # Write checkpoint files with distinct names
                 for resp in successful_responses(checkpoint_cardinal_responses):
-                    path = session_dir / f"checkpoint-judge-{resp.alias.lower()}.md"
+                    path = session_dir.judicial / f"checkpoint-judge-{resp.alias.lower()}.md"
                     path.write_text(f"# Mid-Debate Checkpoint: {resp.alias}\n\n{resp.content}\n")
 
                 all_responses["cardinals"].extend(checkpoint_cardinal_responses)
@@ -2628,7 +2677,7 @@ def main():
                 # but flag it — they get to see both halves in the final judgment
                 if checkpoint_remand:
                     progress.warn(f"Judges flagged concerns at checkpoint: {checkpoint_reason}")
-                    (session_dir / "checkpoint-flag.md").write_text(
+                    (session_dir.judicial / "checkpoint-flag.md").write_text(
                         f"# Mid-Debate Judicial Flag\n\n{checkpoint_reason}\n"
                     )
 
@@ -2701,7 +2750,7 @@ def main():
             remand_count += 1
             progress.warn(f"REMAND #{remand_count} — running additional debate round...")
 
-            (session_dir / "remand-brief.md").write_text(
+            (session_dir.judicial / "remand-brief.md").write_text(
                 f"# Remand Brief\n\nThe judges sent the deliberation back.\n\n"
                 f"**Reason**: {remand_reason}\n"
             )
@@ -2831,7 +2880,7 @@ def main():
         cardinal_responses, fresh_eyes_response, session_id, config,
         dissent_responses=dissent_responses,
     )
-    (session_dir / "final-output.md").write_text(final_output)
+    (session_dir.meta / "final-output.md").write_text(final_output)
 
     write_debrief(all_responses, session_id, session_dir, config, wall_time, remand_count)
     write_council_log(all_responses, session_id, session_dir, config, wall_time, remand_count)
@@ -2903,14 +2952,10 @@ def main():
     if args.emit == "summary":
         good_adv = successful_responses(all_responses["advocates"])
         cost = total_cost(every_response)
-        files_in_dir = len(list(session_dir.iterdir()))
+        files_in_dir = len(list(session_dir.rglob("*")))
         print(f"TRIBUNAL SESSION COMPLETE: {session_id}")
         print(f"  Depth: {config.depth.name} | Advocates: {len(good_adv)} | Cost: ${cost:.4f}")
         print(f"  Files: {files_in_dir} artifacts in {session_dir}/")
-        print(f"  Output:     {session_dir}/final-output.md")
-        print(f"  Debrief:    {session_dir}/debrief.md")
-        if (session_dir / "play-by-play.md").exists():
-            print(f"  Play-by-play: {session_dir}/play-by-play.md")
         # Find the canonical summary files (YYYYMMDD-session-summary-*.{md,pdf})
         _summary_mds = sorted(session_dir.glob("[0-9]*-session-summary-*.md"))
         _summary_pdfs = sorted(session_dir.glob("[0-9]*-session-summary-*.pdf"))
@@ -2922,21 +2967,24 @@ def main():
             print(f"  PDF:        {_summary_pdfs[-1]}")
         elif (session_dir / "session-summary.pdf").exists():
             print(f"  PDF:        {session_dir}/session-summary.pdf")
+        print(f"  Debrief:    {session_dir.narrative}/debrief.md")
+        if (session_dir.narrative / "play-by-play.md").exists():
+            print(f"  Play-by-play: {session_dir.narrative}/play-by-play.md")
         if (session_dir / "screenplay.md").exists():
             print(f"  Screenplay: {session_dir}/screenplay.md")
-        # Audio: auto-named <session-id>-audio.mp3
         audio_path = session_dir / f"{session_id}-audio.mp3"
         if audio_path.exists():
             print(f"  Audio:      {audio_path}")
-        print(f"  Log:        {session_dir}/council-log.json")
+        print(f"  Log:        {session_dir.meta}/council-log.json")
         print(f"")
         print(f"  ✅ Session saved to: {session_dir.resolve()}/")
     elif args.emit == "json":
-        log = json.loads((session_dir / "council-log.json").read_text())
+        log = json.loads((session_dir.meta / "council-log.json").read_text())
         print(json.dumps(log, indent=2))
     elif args.emit == "paths":
-        for p in sorted(session_dir.iterdir()):
-            print(str(p))
+        for p in sorted(session_dir.rglob("*")):
+            if p.is_file():
+                print(str(p))
 
 
 if __name__ == "__main__":
