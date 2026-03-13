@@ -9,6 +9,22 @@ Briefing → Data Room → Advocates argue independently → Cross-examination
   → Adversarial debate → Judicial review → Fresh Eyes → Session summary
 ```
 
+## How It Works
+
+The Tribunal is a structured multi-model deliberation system. Instead of asking one AI model a question and trusting its answer, the Tribunal convenes a panel of independent models, forces them to argue, and subjects their conclusions to judicial review. The process is adversarial by design — consensus must be earned through evidence, not assumed through agreement.
+
+**Advocates** are independent AI models (e.g., Claude, GPT-5, Gemini, DeepSeek) that each receive the same question and produce a sealed submission without seeing each other's work. They are anonymized as Advocate-A, Advocate-B, etc. to prevent brand-bias from influencing the judges. Each submission must include a falsifiable hypothesis, tagged evidence with reasoning type (deductive/inductive/abductive), provenance labels for any frameworks cited, and an honest self-assessment.
+
+**Challenges** follow submissions. Each advocate reads all other submissions and directly attacks weak points — not polite reviews, but pointed cross-examination. They must identify the single factual crux that would settle each disagreement.
+
+**Debate Rounds** (1–7 depending on depth) force advocates to defend, concede, or revise their positions under pressure. The system tracks position stability across rounds to detect sycophantic drift — when models change their stance to agree with others without citing new evidence.
+
+**Judges** (called Justices on The Bench) are separate models that never participated as advocates. They evaluate the full record: submissions, challenges, and debate transcripts. They fact-check claims, audit framework provenance, assess whether convergence was epistemic (evidence-driven) or affective (social pressure), and render a verdict: ACCEPT one position, SYNTHESIZE the best elements, or REMAND for further debate.
+
+**Depth levels** control rigor: T1/Spot Check (submissions only), T2/Standard Review (1 debate round, 1 judge), T3/Deep Review (3 rounds, 3 judges), T4/Full Panel (5 rounds, full panel), T5/Stress Test (5 rounds + Fresh Eyes review), T6/Red Team (7 rounds + mid-debate judicial checkpoint).
+
+The system is deterministic code — it cannot be sycophantic. It dispatches prompts, collects responses, anonymizes identities, and enforces the adversarial structure. The models argue; the code referees.
+
 ## Why
 
 Large language models are confident, articulate, and often wrong. A single model call gives you one perspective with no adversarial pressure. The Tribunal applies the oldest reliability mechanism humans have — structured argument — to AI output:
@@ -66,22 +82,6 @@ The Tribunal works with just a Together AI key. Additional features unlock as yo
 | **Audio** | + `ELEVENLABS_API_KEY` + `ffmpeg` | Dramatized podcast-style MP3 of the deliberation |
 | **PDF** | + `reportlab` (pip) | Polished PDF of the session summary |
 | **NLI** | + GPU host running `nli_server.py` | DeBERTa-v3-large validates advocate claims via Natural Language Inference |
-
-## How It Works
-
-The Tribunal is a structured multi-model deliberation system. Instead of asking one AI model a question and trusting its answer, the Tribunal convenes a panel of independent models, forces them to argue, and subjects their conclusions to judicial review. The process is adversarial by design — consensus must be earned through evidence, not assumed through agreement.
-
-**Advocates** are independent AI models (e.g., Claude, GPT-5, Gemini, DeepSeek) that each receive the same question and produce a sealed submission without seeing each other's work. They are anonymized as Advocate-A, Advocate-B, etc. to prevent brand-bias from influencing the judges. Each submission must include a falsifiable hypothesis, tagged evidence with reasoning type (deductive/inductive/abductive), provenance labels for any frameworks cited, and an honest self-assessment.
-
-**Challenges** follow submissions. Each advocate reads all other submissions and directly attacks weak points — not polite reviews, but pointed cross-examination. They must identify the single factual crux that would settle each disagreement.
-
-**Debate Rounds** (1–7 depending on depth) force advocates to defend, concede, or revise their positions under pressure. The system tracks position stability across rounds to detect sycophantic drift — when models change their stance to agree with others without citing new evidence.
-
-**Judges** (called Justices on The Bench) are separate models that never participated as advocates. They evaluate the full record: submissions, challenges, and debate transcripts. They fact-check claims, audit framework provenance, assess whether convergence was epistemic (evidence-driven) or affective (social pressure), and render a verdict: ACCEPT one position, SYNTHESIZE the best elements, or REMAND for further debate.
-
-**Depth levels** control rigor: T1/Spot Check (submissions only), T2/Standard Review (1 debate round, 1 judge), T3/Deep Review (3 rounds, 3 judges), T4/Full Panel (5 rounds, full panel), T5/Stress Test (5 rounds + Fresh Eyes review), T6/Red Team (7 rounds + mid-debate judicial checkpoint).
-
-The system is deterministic code — it cannot be sycophantic. It dispatches prompts, collects responses, anonymizes identities, and enforces the adversarial structure. The models argue; the code referees.
 
 ## Model Roster
 
