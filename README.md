@@ -1,23 +1,58 @@
 # The Tribunal
 
-A multi-model deliberation engine that makes AI models argue with each other before reaching a conclusion. Models serve as advocates (who argue), judges (who evaluate), and a Fresh Eyes reviewer (who sanity-checks the final output). The orchestrator is deterministic Python — it dispatches, anonymizes, and routes, but never opinionates.
+**Multiple AI models debate a question until only the truth survives.**
 
-The premise: if you want a reliable answer from AI, don't ask one model — make several models argue about it, challenge each other's evidence, and have impartial judges evaluate who's right.
-
-## How It Works
+The Tribunal is a multi-model deliberation engine. Instead of asking one model and trusting whatever comes back, it assigns the question to a panel of independent advocates who argue, cross-examine, and debate — then routes the full transcript to impartial judges who render a verdict. The orchestrator is deterministic Python. It dispatches, anonymizes, and routes, but never opinionates.
 
 ```
-Briefing → Advocates argue independently → Cross-examination → Adversarial debate
-    → Judicial review → (optional) Fresh Eyes → Session summary + play-by-play
+Briefing → Data Room → Advocates argue independently → Cross-examination
+  → Adversarial debate → Judicial review → Fresh Eyes → Session summary
 ```
 
-1. **Advocates** receive the question independently and submit structured arguments (hypothesis + evidence + self-assessment)
-2. **Challenge round** — each advocate reads all other submissions and issues direct, pointed challenges
-3. **Debate rounds** — advocates must DEFEND, CONCEDE, or REVISE for each challenge. Position stability is tracked.
-4. **Dissenting opinions** — advocates who held their ground throughout debate but lost the verdict can issue a formal dissent for the record
-5. **The Bench** — impartial judges (Justices, Appellate Judges, Magistrate Judges) evaluate the full transcript and render a verdict: ACCEPT, SYNTHESIZE, or REMAND
-6. **Fresh Eyes** — a model that never saw the debate reviews the final output cold
-7. **Session summary** — structured output: Question → Recommended Outcome → How We Got Here → Build This
+## Why
+
+Large language models are confident, articulate, and often wrong. A single model call gives you one perspective with no adversarial pressure. The Tribunal applies the oldest reliability mechanism humans have — structured argument — to AI output:
+
+- **Advocates** receive the question independently. No anchoring, no groupthink.
+- **Challenge rounds** force advocates to directly confront each other's claims.
+- **Debate rounds** require advocates to DEFEND, CONCEDE, or REVISE under pressure. Position changes are tracked.
+- **Judges** (who never advocated) evaluate the transcript and render a verdict: ACCEPT, SYNTHESIZE, or REMAND.
+- **Fresh Eyes** — a model that never saw any of it reviews the final output cold.
+- **Dissenting opinions** preserve minority positions backed by evidence.
+
+The result is a structured session with full provenance: who said what, who changed their mind, and why.
+
+## Quick Start
+
+```bash
+git clone https://github.com/mdm-sfo/tribunal.git
+cd tribunal
+pip install -r requirements.txt
+
+# Set your API key (Together AI is the only requirement)
+export TOGETHER_API_KEY="your_key_here"
+
+# Write a question
+echo "Should we use Rust or Go for our new CLI tool?" > briefing.md
+
+# Run it
+python3 scripts/council_orchestrator.py --briefing briefing.md --depth T3
+```
+
+Output lands in `./conclave-sessions/`. Each session is a directory with the briefing, all submissions, debate transcripts, judicial opinions, and a structured summary.
+
+## Depth Levels
+
+Depth controls how many models argue, how many rounds of debate occur, and how large the judicial panel is.
+
+| Depth | Name | Advocates | Debate Rounds | Judges | Est. Cost |
+|-------|------|-----------|---------------|--------|-----------|
+| **T1** | Spot Check | 2 | 0 | 0 | ~$0.10 |
+| **T2** | Standard Review | 4 | 1 | 1 Bishop | ~$0.50 |
+| **T3** | Deep Review | 5 | 3 | 2 Bishops + 1 Priest | ~$2.00 |
+| **T4** | Full Panel | 5 | 5 | 2 Bishops + 1 Priest + 1 Deacon | ~$5.00 |
+| **T5** | Stress Test | 6 | 5 | Full bench + stability audit + Fresh Eyes | ~$10.00 |
+| **T6** | Red Team | 6 | 7 | Full bench + mid-debate checkpoint + Fresh Eyes | ~$15.00 |
 
 ## Feature Tiers
 
@@ -25,193 +60,154 @@ The Tribunal works with just a Together AI key. Additional features unlock as yo
 
 | Tier | What You Need | What You Get |
 |------|---------------|--------------|
-| **Core** | `TOGETHER_API_KEY` | Full deliberation engine — advocates, debate, judges, session summary, play-by-play. Uses open-weight models (DeepSeek V3, Qwen, Kimi K2, Llama 4) for advocates and all judge roles. |
-| **Enhanced** | + `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY` | Frontier model advocates (Claude Sonnet, GPT-5, Gemini 2.5 Pro) alongside open-weight models. Stronger panels, more diverse reasoning. Add any combination — each key adds one frontier advocate. |
-| **Audio** | + `ELEVENLABS_API_KEY` + `ffmpeg` | Dramatized podcast-style MP3 of the deliberation. Screenplay generation + TTS voice casting + ffmpeg stitching. |
-| **PDF** | + `reportlab` (pip install) | Polished academic-style PDF of the session summary. Auto-generated alongside the markdown. |
-| **NLI Validation** | + GPU host running `nli_server.py` | DeBERTa-v3-large validates advocate claims against source text via Natural Language Inference. Without this, uses rule-based validation (number/entity matching) — still functional, just less precise. |
+| **Core** | `TOGETHER_API_KEY` | Full deliberation engine with open-weight advocates (DeepSeek V3, Qwen, Kimi K2, Llama 4) and all judge roles |
+| **Enhanced** | + `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY` | Frontier advocates (Claude Sonnet, GPT-5, Gemini 2.5 Pro). Each key adds one. Any combination works. |
+| **Search** | + `PERPLEXITY_API_KEY` | Perplexity Sonar Pro advocate with live web search grounding |
+| **Audio** | + `ELEVENLABS_API_KEY` + `ffmpeg` | Dramatized podcast-style MP3 of the deliberation |
+| **PDF** | + `reportlab` (pip) | Polished PDF of the session summary |
+| **NLI** | + GPU host running `nli_server.py` | DeBERTa-v3-large validates advocate claims via Natural Language Inference |
 
-> **Minimum viable setup**: `pip install -r requirements.txt`, set `TOGETHER_API_KEY`, run. Everything else is optional.
+## How It Works
 
-## Depth Levels
+### 1. Briefing & Data Room
 
-| Depth | Advocates | Debate Rounds | Judges | Est. Cost | Use When |
-|-------|-----------|---------------|--------|-----------|----------|
-| QUICK | 2 | 0 | 0 | ~$0.10 | Fast first-pass, no debate |
-| BALANCED | 4 | 1 | 1 Justice | ~$0.50 | Standard questions |
-| THOROUGH | 5 | 3 | 2 Justices + 1 Appellate | ~$2.00 | Important decisions |
-| RIGOROUS | 5 | 5 | 2 Justices + 1 Appellate + 1 Magistrate | ~$5.00 | High-stakes decisions |
-| EXHAUSTIVE | 6 | 5 | Full panel + stability audit + Fresh Eyes | ~$10.00 | Critical decisions |
-| NUCLEAR | 6 | 7 | Full panel + mid-debate checkpoint + Fresh Eyes | ~$15.00 | Maximum rigor |
+The orchestrator reads your question from a markdown file. If it detects stock tickers, it enriches the briefing with live market data (via Massive.com for U.S. equities, Bavest for European markets) so every advocate starts from the same facts. A Perplexity research room can inject web search context.
 
-## Quick Start
+### 2. Advocate Submissions
 
-### Prerequisites
+Each advocate receives the enriched briefing independently and submits a structured argument: hypothesis, evidence (with reasoning type), confidence level, and counterargument acknowledgment. Submissions are anonymized before anyone else sees them.
 
-- Python 3.9+
-- A [Together AI](https://together.ai) API key (required — provides access to all judge models and open-weight advocates)
-- Optional: Anthropic, OpenAI, Google API keys for frontier advocate models
+### 3. Cross-Examination
 
-### Setup
+Every advocate reads all other submissions and issues direct challenges — targeting specific claims, demanding evidence, and probing weaknesses.
 
-```bash
-# Clone the repo
-git clone https://github.com/mdm-sfo/conclave.git
-cd conclave
+### 4. Adversarial Debate
 
-# Install Python dependencies
-pip install -r requirements.txt
+Multiple rounds. For each challenge, advocates must choose: **DEFEND** (counter with evidence), **CONCEDE** (acknowledge the flaw), or **REVISE** (update their position). Position stability is tracked across rounds to catch sycophantic drift — models that flip under social pressure without new evidence.
 
-# Copy the environment template and fill in your API keys
-cp .env.example .env
-# Edit .env with your keys, then:
-source .env
-# Or on EC2/remote, add exports to ~/.bashrc
-```
+### 5. Judicial Review
 
-> **Detailed installation instructions** for macOS, Ubuntu, Amazon Linux (EC2), and aarch64 (DGX Spark): see **[docs/INSTALL.md](docs/INSTALL.md)**
+Judges who never participated in the debate evaluate the full transcript:
 
-### Running a Deliberation
+- **Bishops** (permanent bench, T2+) — Qwen 3.5 397B, DeepSeek R1
+- **Priests** (rotation pool, T3+) — MiniMax M2.5, Kimi K2, Zhipu GLM-4.7, Mistral Large
+- **Deacons** (extended bench, T4+) — GPT-OSS 120B, Qwen 3 235B, Zhipu GLM-5, DeepCogito v2.1
 
-```bash
-# Write your question in a briefing file
-cat > briefing.md << 'EOF'
-Should we use Rust or Go for our new CLI tool?
-Our team has 8 engineers with deep Python experience.
-Key requirements: fast startup, low memory, good concurrency.
-EOF
+Judges render verdicts: **ACCEPT** (clear winner), **SYNTHESIZE** (merge best elements), or **REMAND** (send back for one more round, max once).
 
-# Run at THOROUGH depth
-python3 scripts/council_orchestrator.py --briefing briefing.md --depth THOROUGH
+### 6. Fresh Eyes & Summary
 
-# Output goes to ./conclave-sessions/tribunal-rust-or-go-for-our-20260302-223614/
-# Or to TRIBUNAL_OUTPUT_DIR if set
-```
+At T5+, a model that never saw any of the deliberation reviews the final output for coherence. The session concludes with a structured summary: Question, Recommended Outcome, How We Got Here, and actionable next steps.
 
-### With Audio (TTS)
+## Model Roster
 
-The screenplay pipeline generates a dramatized audio version of the deliberation using ElevenLabs voices.
+### Advocates
 
-```bash
-# Requires: ELEVENLABS_API_KEY and ffmpeg
-python3 scripts/screenplay_generator.py --demo --tts
+| Model | Provider | Notes |
+|-------|----------|-------|
+| Claude Sonnet | Anthropic | Requires `ANTHROPIC_API_KEY` |
+| GPT-5 | OpenAI | Requires `OPENAI_API_KEY`. Reasoning model. |
+| Gemini 2.5 Pro | Google | Requires `GOOGLE_API_KEY`. Has Google Search grounding. |
+| DeepSeek V3 | Together AI | Included with core tier |
+| Perplexity Sonar Pro | Perplexity AI | Requires `PERPLEXITY_API_KEY`. Live web search. |
 
-# Or from a real session:
-python3 scripts/screenplay_generator.py --session-dir ./conclave-sessions/tribunal-rust-or-go-20260301-061125 --tts
-```
+When fewer frontier keys are available than the depth requires, the panel is filled from an open-weight backfill pool: Qwen 3 235B, MiniMax M1, Kimi K2, Llama 4 Maverick — all via Together AI.
 
-**Installing ffmpeg on Amazon Linux:**
-```bash
-cd /tmp
-curl -LO https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz
-tar xf ffmpeg-release-amd64-static.tar.xz
-sudo cp ffmpeg-*-static/ffmpeg /usr/local/bin/
-sudo cp ffmpeg-*-static/ffprobe /usr/local/bin/
-```
+### Judges
 
-### With NLI Validation (GPU)
-
-NLI validation uses DeBERTa-v3-large to check advocate claims against source text. It requires a GPU host (any NVIDIA GPU with 4GB+ VRAM).
-
-```bash
-# On your GPU host:
-bash setup_nli_server.sh
-
-# Then set the URL in your environment:
-export TRIBUNAL_NLI_URL=http://your-gpu-host:8787
-
-# The screenplay pipeline will auto-detect the NLI server and use it.
-# If unreachable, it falls back to rule-based validation automatically.
-```
+All judges run on Together AI or Cerebras. No additional keys required beyond `TOGETHER_API_KEY`. Adding `CEREBRAS_API_KEY` and `MISTRAL_API_KEY` expands the available bench.
 
 ## Environment Variables
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `TOGETHER_API_KEY` | **Yes** | Together AI — all judge models + open-weight advocates |
-| `ANTHROPIC_API_KEY` | No | Anthropic — Claude Sonnet advocate |
-| `OPENAI_API_KEY` | No | OpenAI — GPT-5 advocate |
-| `GOOGLE_API_KEY` | No | Google — Gemini 2.5 Pro advocate |
-| `FIREWORKS_API_KEY` | No | Fireworks AI — backup model routing |
-| `ELEVENLABS_API_KEY` | No | ElevenLabs — TTS audio generation |
+| `TOGETHER_API_KEY` | **Yes** | Together AI — judges + open-weight advocates |
+| `ANTHROPIC_API_KEY` | No | Claude Sonnet advocate |
+| `OPENAI_API_KEY` | No | GPT-5 advocate |
+| `GOOGLE_API_KEY` | No | Gemini 2.5 Pro advocate |
+| `PERPLEXITY_API_KEY` | No | Perplexity Sonar Pro advocate (web search) |
+| `CEREBRAS_API_KEY` | No | Cerebras-hosted judges (Qwen 3 235B, GPT-OSS 120B) |
+| `MISTRAL_API_KEY` | No | Mistral Large judge |
+| `FIREWORKS_API_KEY` | No | Backup model routing |
+| `ELEVENLABS_API_KEY` | No | TTS audio generation |
 | `TRIBUNAL_OUTPUT_DIR` | No | Session output directory (default: `./conclave-sessions`) |
-| `TRIBUNAL_NLI_URL` | No | NLI validation server endpoint (e.g., `http://your-gpu-host:8787`) |
-| `CONCLAVE_DEFAULT_DEPTH` | No | Default depth level (default: `QUICK`) |
+| `TRIBUNAL_NLI_URL` | No | NLI validation server (e.g., `http://gpu-host:8787`) |
+| `CONCLAVE_DEFAULT_DEPTH` | No | Default depth (default: `T1`) |
 | `CONCLAVE_MAX_COST` | No | Max cost per session in USD (default: `5.00`) |
 
 See `.env.example` for a complete template.
 
-## Model Roster
+## Audio Generation
 
-### Advocates (Frontier Models)
-- Claude Sonnet (Anthropic) — requires `ANTHROPIC_API_KEY`
-- GPT-5 (OpenAI) — requires `OPENAI_API_KEY`
-- Gemini 2.5 Pro (Google) — requires `GOOGLE_API_KEY`
-- DeepSeek V3 (Together AI) — included with `TOGETHER_API_KEY`
+The screenplay pipeline generates a dramatized podcast-style MP3 of the deliberation using ElevenLabs voices.
 
-### Advocate Backfill Pool (Together AI)
-When fewer frontier keys are available than the depth level requires, the panel is filled from:
-- Qwen 3 235B, MiniMax M1, Kimi K2, Llama 4 Maverick
+```bash
+# Requires: ELEVENLABS_API_KEY and ffmpeg
+python3 scripts/screenplay_generator.py \
+    --session-dir ./conclave-sessions/your-session/ --tts
+```
 
-### The Bench (Judges)
-All judges run on Together AI — no additional keys needed.
-- **Justices** (always seated at THOROUGH+): Qwen 3.5 397B, DeepSeek R1
-- **Appellate Judges** (rotation pool): MiniMax M2.5, Kimi K2, Zhipu GLM-4.7
-- **Magistrate Judges** (extended bench): GPT-OSS 120B, Zhipu GLM-5, DeepCogito v2.1 671B
+## NLI Validation
 
-### NLI Validation
-- DeBERTa-v3-large-MNLI on any NVIDIA GPU — validates advocate claims against source text
-- Falls back to rule-based validation (number/entity matching) if no GPU server is configured
-- Setup: run `setup_nli_server.sh` on your GPU host, then set `TRIBUNAL_NLI_URL`
+DeBERTa-v3-large validates advocate claims against source text. Requires any NVIDIA GPU with 4GB+ VRAM.
 
-## Output Files
+```bash
+# On your GPU host:
+bash setup_nli_server.sh
 
-Each session produces a directory with:
+# Then point the orchestrator at it:
+export TRIBUNAL_NLI_URL=http://your-gpu-host:8787
+```
 
-| File | Description |
-|------|-------------|
-| `briefing.md` | The original question |
-| `submission-advocate-*.md` | Each advocate's initial submission |
-| `challenge-by-advocate-*.md` | Cross-examination challenges |
-| `debate-round-*-advocate-*.md` | Debate responses (DEFEND/CONCEDE/REVISE) |
-| `dissent-advocate-*.md` | Formal dissenting opinions (if any) |
-| `judgment-judge-*.md` | Judicial opinions from The Bench |
-| `fresh-eyes-review.md` | Fresh Eyes sanity check |
-| `session-summary.md` | Canonical summary: Question → Outcome → How → Build This |
-| `session-summary.pdf` | Styled PDF version of the session summary (requires `reportlab`) |
-| `play-by-play.md` | Dramatic narrative of the debate |
-| `screenplay.md` | TTS-ready screenplay (if `--demo` or screenplay pipeline) |
-| `voice-script.json` | TTS manifest with character/line data |
-| `*-audio.mp3` | Dramatized audio (if `--tts`) |
-| `debrief.md` | Full panel composition, statistics, identity reveals |
-| `council-log.json` | Machine-readable session log |
-| `position-stability.md` | Kelley-Riedl sycophancy audit scorecard |
-| `alias-map.json` | Advocate identity reveal |
-| `cardinal-alias-map.json` | Judge identity reveal |
+Falls back to rule-based validation (number/entity matching) if no GPU server is configured.
+
+## Output Structure
+
+Each session produces a directory:
+
+```
+tribunal-your-topic-20260310-223614/
+├── briefing.md                  # Original question
+├── submissions/                 # Advocate initial arguments
+├── deliberation/                # Cross-examination + debate rounds
+├── judicial/                    # Judge opinions + verdicts
+├── narrative/                   # Play-by-play + screenplay + audio
+├── session-summary.md           # Structured summary
+├── session-summary.pdf          # PDF version (if reportlab installed)
+├── council-log.json             # Machine-readable session log
+├── position-stability.md        # Sycophancy audit scorecard
+├── debrief.md                   # Panel composition + identity reveals
+└── meta/                        # Alias maps, cost tracking
+```
 
 ## Architecture
 
 ```
-scripts/council_orchestrator.py    — Core state machine (deterministic, not a model)
-scripts/config_loader.py           — Model roster, depth levels, env var resolution
-scripts/model_client.py            — LiteLLM wrapper: fan_out, fan_out_multi, call_model
-scripts/progress.py                — Terminal output formatting
-scripts/screenplay_generator.py    — Three-pass pipeline: extraction → validation → dramatization
-scripts/summary_pdf.py             — ReportLab PDF generation from session-summary.md
-scripts/tts_pipeline.py            — ElevenLabs TTS: voice casting, delivery tags, ffmpeg stitch
-scripts/nli_server.py              — FastAPI NLI server (DeBERTa-v3-large on GPU)
-setup_nli_server.sh                — One-command NLI server setup for GPU hosts
+scripts/
+  council_orchestrator.py   — Core state machine (deterministic, not a model)
+  config_loader.py          — Model roster, depth levels, env var resolution
+  model_client.py           — LiteLLM wrapper: fan_out, fan_out_multi, call_model
+  data_room_enricher.py     — Live market data + web search enrichment
+  screenplay_generator.py   — Three-pass pipeline: extraction → validation → dramatization
+  summary_pdf.py            — ReportLab PDF generation
+  tts_pipeline.py           — ElevenLabs TTS: voice casting + ffmpeg stitching
+  nli_server.py             — FastAPI NLI server (DeBERTa-v3-large on GPU)
+  progress.py               — Terminal output formatting
 ```
 
 ## Design Principles
 
-1. **The orchestrator is code, not a model.** It can't be sycophantic. It dispatches, collects, anonymizes, routes, and manages — but never opinionates.
-2. **Advocates argue with hypothesis + evidence.** Every claim must cite reasoning type (deductive/inductive/abductive) and specific proof.
-3. **Cardinals embody rigorous skepticism** — treating suspicious unanimity as a defect, not a feature.
-4. **Position stability tracking** catches sycophantic drift: when models change positions under social pressure without new evidence.
-5. **Dissenting opinions** ensure that minority positions survive to the final output when backed by evidence.
-6. **Maximum 1 remand per session** — judges can send it back once, but not create infinite loops.
-7. **Uncertainty must survive to final output** — papering over disagreement is worse than admitting it.
+1. **The orchestrator is code, not a model.** It can't be sycophantic.
+2. **Every claim must cite reasoning type** — deductive, inductive, or abductive — and specific evidence.
+3. **Suspicious unanimity is a defect**, not a feature. Judges treat it accordingly.
+4. **Position stability tracking** catches sycophantic drift: models changing positions under social pressure without new evidence.
+5. **Dissenting opinions survive to final output** when backed by evidence.
+6. **Maximum 1 remand per session** — judges can send it back once, not forever.
+7. **Uncertainty must survive.** Papering over disagreement is worse than admitting it.
+
+## Installation
+
+See **[docs/INSTALL.md](docs/INSTALL.md)** for detailed instructions covering macOS, Ubuntu, Amazon Linux (EC2), and aarch64 (DGX Spark).
 
 ## License
 
