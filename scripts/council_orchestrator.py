@@ -43,7 +43,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from config_loader import (
     load_config, ConclaveConfig, DepthConfig, ModelDef,
-    BISHOPS, PRIESTS, DEACONS,
+    BISHOPS, PRIESTS, DEACONS, FACT_CHECKER,
 )
 from model_client import (
     fan_out, fan_out_multi, call_model, generate_aliases,
@@ -676,6 +676,101 @@ conclusion (most important first):
 Be precise. This matrix is the evidentiary backbone of the session record."""
 
 
+EVIDENCE_INJECTION_SYSTEM_PROMPT = """\
+You are a research analyst with web search access. Your job is to find
+COUNTER-EVIDENCE — real-world data, published research, or documented cases
+that CONTRADICT or complicate the claims made by experts in a structured
+deliberation.
+
+For each advocate's top 2-3 claims, search for:
+1. Data points that directly contradict the claim
+2. Cases or examples that undermine the generalization
+3. Methodological problems with the cited evidence
+4. More recent data that supersedes what was cited
+
+## Output Format
+
+For each advocate, produce:
+
+### Counter-Evidence for [Advocate-X]
+
+**Claim:** "[their specific claim]"
+**Counter-evidence:** [what you found, with sources and URLs where possible]
+**Strength:** STRONG (directly contradicts) / MODERATE (complicates) / WEAK (tangential)
+
+---
+
+If you find NO credible counter-evidence for a claim, say so explicitly —
+that's valuable signal for the debate.
+
+Be specific. Cite URLs, dates, and numbers. Do not fabricate sources.
+Focus on the 2-3 most important claims per advocate — the ones that,
+if wrong, would collapse their entire argument."""
+
+
+STATE_OF_PLAY_SYSTEM_PROMPT = """\
+You are a debate moderator producing a brief, factual summary of what just
+happened in a debate round. You are NOT a participant — you are a neutral
+observer documenting the state of play.
+
+Produce a summary in EXACTLY this format (keep it under 300 words):
+
+### State of Play After Round {round_num}
+
+**Concessions made this round:**
+- [Advocate-X] conceded [specific point] to [Advocate-Y]
+(list all concessions, or "None" if no concessions were made)
+
+**Positions that shifted:**
+- [Advocate-X]: [brief description of how their position changed]
+(list all shifts, or "No positions shifted" if all held firm)
+
+**Key counter-attacks launched:**
+- [Advocate-X] challenged [Advocate-Y] on [specific point]
+(list new challenges introduced this round)
+
+**Still contested (unresolved cruxes):**
+- [specific factual or analytical question that remains open]
+
+**Current alignment:**
+[One sentence: are advocates converging, diverging, or holding steady?]
+
+Be factual. Do not editorialize. Do not assess who is "winning."
+Quote specific claims and concessions — do not summarize vaguely."""
+
+
+STABILITY_ASSESSMENT_SYSTEM_PROMPT = """\
+You are an analytical reviewer comparing two versions of an expert's position
+to assess how much it changed between debate rounds.
+
+You will receive:
+- The expert's PREVIOUS position (from the prior round or initial submission)
+- The expert's CURRENT position (from this round)
+
+Assess the change on this scale:
+1 = ROCK SOLID — No meaningful change in substance. Same thesis, same evidence,
+    same conclusion.
+2 = MINOR REFINEMENT — Wording or scope adjusted, but the core thesis and
+    evidence are intact.
+3 = SIGNIFICANT REFINEMENT — A key supporting argument was conceded or modified,
+    but the overall conclusion survived.
+4 = MAJOR REVISION — The expert changed a substantial part of their argument.
+    The conclusion may be the same but the reasoning is fundamentally different,
+    OR the conclusion shifted meaningfully.
+5 = POSITION ABANDONED — The expert's current position contradicts or is
+    incompatible with their previous position.
+
+Also assess whether the change was EVIDENCE-BASED (the expert cited new data or
+responded to a specific factual challenge) or PRESSURE-BASED (the expert softened
+their position without citing new evidence).
+
+## Output Format (EXACTLY this — no other text):
+
+Stability: [1-5]
+Change type: [EVIDENCE-BASED / PRESSURE-BASED / NO CHANGE]
+Summary: [One sentence describing what changed and why]"""
+
+
 # ---------------------------------------------------------------------------
 # Play-by-play narrative prompt
 # ---------------------------------------------------------------------------
@@ -1099,6 +1194,195 @@ def run_challenge_phase(
 
 
 # ---------------------------------------------------------------------------
+# Phase 4.5: Evidence injection (counter-evidence via Perplexity Sonar Pro)
+# ---------------------------------------------------------------------------
+
+def run_evidence_injection(
+    advocate_responses: list[ModelResponse],
+    briefing: str,
+    config: ConclaveConfig,
+    session_dir: SessionDir,
+    progress: Progress,
+) -> str:
+    """Search for real-world counter-evidence to each advocate's top claims.
+
+    Uses Perplexity Sonar Pro (web search enabled) to find data that
+    contradicts or complicates advocates' arguments. The counter-evidence
+    brief is injected into the next debate round to stress-test positions
+    with external data, not just argumentative pressure.
+
+    Returns the counter-evidence brief as a string, or empty string if
+    the injection fails or is skipped.
+    """
+    good_advocates = successful_responses(advocate_responses)
+    if len(good_advocates) < 2:
+        return ""
+
+    progress.phase(4, "Evidence injection — searching for counter-evidence (Perplexity)...")
+
+    claims_summary = "\n\n---\n\n".join(
+        f"## {r.alias}\n\n{r.content}" for r in good_advocates
+    )
+
+    injection_prompt = (
+        f"## Original Question\n\n{briefing}\n\n"
+        f"{'=' * 60}\n\n"
+        f"## Expert Positions\n\n{claims_summary}\n\n"
+        f"{'=' * 60}\n\n"
+        f"For each expert above, identify their 2-3 strongest claims and "
+        f"search for real-world counter-evidence. Focus on claims that, if "
+        f"wrong, would collapse their entire argument."
+    )
+
+    resp = call_model(
+        model=FACT_CHECKER,
+        system_prompt=EVIDENCE_INJECTION_SYSTEM_PROMPT,
+        user_prompt=injection_prompt,
+        alias="Evidence-Injection",
+        timeout=config.depth.timeout_per_model,
+        temperature=0.3,
+        max_tokens=4096,
+        progress=progress,
+    )
+
+    if resp.status != "success" or not resp.content:
+        progress.warn("Evidence injection failed — continuing without counter-evidence")
+        return ""
+
+    brief = resp.content
+    path = session_dir.deliberation / "counter-evidence-brief.md"
+    path.write_text(f"# Counter-Evidence Brief\n\n{brief}\n")
+    progress.info(f"Counter-evidence brief written ({len(brief)} chars)")
+    return brief
+
+
+# ---------------------------------------------------------------------------
+# Debate helpers: state-of-play memo, external stability
+# ---------------------------------------------------------------------------
+
+def generate_state_of_play(
+    round_num: int,
+    round_responses: list[ModelResponse],
+    latest_positions: dict[str, str],
+    config: ConclaveConfig,
+    progress: Progress,
+) -> str:
+    """Generate a brief state-of-play memo after a debate round.
+
+    Uses Cerebras Qwen (fast, cheap) to compress the round's outcomes
+    into a shared understanding for the next round. This closes the
+    information gap caused by parallel dispatch — advocates in the next
+    round see what everyone conceded, defended, and challenged.
+
+    Returns the memo as a string, or empty string on failure.
+    """
+    good_round = successful_responses(round_responses)
+    if not good_round:
+        return ""
+
+    round_text = "\n\n---\n\n".join(
+        f"### {r.alias}\n\n{r.content}" for r in good_round
+    )
+
+    memo_prompt = (
+        f"## Debate Round {round_num} — All Responses\n\n{round_text}\n\n"
+        f"{'=' * 60}\n\n"
+        f"Produce a state-of-play memo for round {round_num}. "
+        f"Be factual and specific — quote actual claims and concessions."
+    )
+
+    # Use Cerebras Qwen (BISHOPS[0]) — fast and cheap
+    memo_model = config.bishops[0] if config.bishops else BISHOPS[0]
+
+    resp = call_model(
+        model=memo_model,
+        system_prompt=STATE_OF_PLAY_SYSTEM_PROMPT.replace("{round_num}", str(round_num)),
+        user_prompt=memo_prompt,
+        alias=f"State-of-Play-R{round_num}",
+        timeout=30,
+        temperature=0.2,
+        max_tokens=1024,
+        progress=progress,
+    )
+
+    if resp.status != "success" or not resp.content:
+        progress.warn(f"State-of-play memo for round {round_num} failed — continuing without it")
+        return ""
+
+    return resp.content
+
+
+def compute_round_stability(
+    round_num: int,
+    previous_positions: dict[str, str],
+    current_positions: dict[str, str],
+    config: ConclaveConfig,
+    progress: Progress,
+) -> dict[str, dict]:
+    """Compute external stability scores by comparing positions across rounds.
+
+    Instead of relying on self-reported stability scores (which create a
+    perverse incentive to under-report changes), this uses a lightweight
+    model to semantically compare each advocate's previous and current
+    positions.
+
+    Returns a dict mapping alias -> {score: int, change_type: str, summary: str}
+    """
+    stability_model = config.bishops[0] if config.bishops else BISHOPS[0]
+    results: dict[str, dict] = {}
+
+    # Build all stability assessment calls for parallel dispatch
+    stability_calls = []
+    aliases_order = []
+
+    for alias in previous_positions:
+        if alias not in current_positions:
+            continue
+        prev = previous_positions[alias]
+        curr = current_positions[alias]
+
+        assess_prompt = (
+            f"## PREVIOUS position ({alias}):\n\n{prev[:3000]}\n\n"
+            f"{'=' * 60}\n\n"
+            f"## CURRENT position ({alias}):\n\n{curr[:3000]}"
+        )
+
+        stability_calls.append({
+            "model": stability_model,
+            "system_prompt": STABILITY_ASSESSMENT_SYSTEM_PROMPT,
+            "user_prompt": assess_prompt,
+            "alias": f"Stability-R{round_num}-{alias}",
+            "timeout": 20,
+            "temperature": 0.1,
+            "max_tokens": 256,
+        })
+        aliases_order.append(alias)
+
+    if not stability_calls:
+        return results
+
+    responses = fan_out_multi(stability_calls, progress=None)
+
+    for alias, resp in zip(aliases_order, responses):
+        if resp.status != "success" or not resp.content:
+            results[alias] = {"score": 0, "change_type": "UNKNOWN", "summary": "Assessment failed"}
+            continue
+
+        content = resp.content.strip()
+        score_match = re.search(r'Stability:\s*([1-5])', content)
+        type_match = re.search(r'Change type:\s*(EVIDENCE-BASED|PRESSURE-BASED|NO CHANGE)', content)
+        summary_match = re.search(r'Summary:\s*(.+)', content)
+
+        results[alias] = {
+            "score": int(score_match.group(1)) if score_match else 0,
+            "change_type": type_match.group(1) if type_match else "UNKNOWN",
+            "summary": summary_match.group(1).strip() if summary_match else content[:100],
+        }
+
+    return results
+
+
+# ---------------------------------------------------------------------------
 # Phase 5: Debate rounds (adversarial defend/concede/revise)
 # ---------------------------------------------------------------------------
 
@@ -1153,77 +1437,128 @@ def _extract_position_stability(content: str) -> int:
 def build_position_stability_report(
     advocate_responses: list[ModelResponse],
     debate_rounds: list[list[ModelResponse]],
+    external_stability_log: list[dict[str, dict]] | None = None,
 ) -> str:
     """Build a position stability scorecard across all debate rounds.
 
-    This is the Kelley-Riedl (2026) inspired flip-rate report. It tracks
-    how each advocate's position shifted round-by-round, flagging potential
-    sycophantic drift (position changes without new evidence).
+    This is the Kelley-Riedl (2026) inspired flip-rate report. When external
+    stability scores are available (computed via semantic diff), those are
+    used. Otherwise falls back to self-reported scores from advocate responses.
     """
     good_advocates = successful_responses(advocate_responses)
     aliases = [r.alias for r in good_advocates]
+    use_external = bool(external_stability_log and len(external_stability_log) == len(debate_rounds))
 
     if not debate_rounds:
         return "(No debate rounds — position stability tracking not applicable)"
 
+    source_label = "externally assessed" if use_external else "self-reported"
     lines = [
         "## Position Stability Scorecard",
         "",
-        "Tracks each advocate's self-reported position stability across debate rounds.",
+        f"Tracks each advocate's position stability across debate rounds ({source_label}).",
         "Scale: 1=Rock Solid, 2=Minor Refinement, 3=Significant Refinement, 4=Major Revision, 5=Position Abandoned",
         "",
-        "| Advocate | " + " | ".join(f"R{i+1}" for i in range(len(debate_rounds))) + " | Avg | Drift Risk |",
-        "|----------|" + "|".join("-----" for _ in debate_rounds) + "|-----|------------|",
     ]
+
+    if use_external:
+        lines.append(
+            "| Advocate | " + " | ".join(f"R{i+1}" for i in range(len(debate_rounds)))
+            + " | Avg | Change Type | Drift Risk |"
+        )
+        lines.append(
+            "|----------|" + "|".join("-----" for _ in debate_rounds)
+            + "|-----|-------------|------------|"
+        )
+    else:
+        lines.append(
+            "| Advocate | " + " | ".join(f"R{i+1}" for i in range(len(debate_rounds)))
+            + " | Avg | Drift Risk |"
+        )
+        lines.append(
+            "|----------|" + "|".join("-----" for _ in debate_rounds)
+            + "|-----|------------|"
+        )
 
     for alias in aliases:
         scores = []
-        for round_resps in debate_rounds:
-            good_round = successful_responses(round_resps)
-            # Find this advocate's response in this round
-            found = False
-            for r in good_round:
-                if alias in r.alias:
-                    score = _extract_position_stability(r.content)
-                    scores.append(score)
-                    found = True
-                    break
-            if not found:
-                scores.append(0)  # missing
+        change_types = []
+
+        for round_idx, round_resps in enumerate(debate_rounds):
+            if use_external:
+                ext_data = external_stability_log[round_idx].get(alias, {})
+                score = ext_data.get("score", 0)
+                change_types.append(ext_data.get("change_type", "UNKNOWN"))
+            else:
+                score = 0
+                good_round = successful_responses(round_resps)
+                for r in good_round:
+                    if alias in r.alias:
+                        score = _extract_position_stability(r.content)
+                        break
+            scores.append(score)
 
         valid_scores = [s for s in scores if s > 0]
         avg = sum(valid_scores) / len(valid_scores) if valid_scores else 0
 
-        # Drift risk assessment
-        if avg >= 4.0:
+        # Drift risk — enhanced with change type when available
+        pressure_count = sum(1 for ct in change_types if ct == "PRESSURE-BASED")
+        if use_external and pressure_count >= 2:
+            drift = "\u26a0\ufe0f HIGH (pressure-based shifts)"
+        elif avg >= 4.0:
             drift = "\u26a0\ufe0f HIGH"
         elif avg >= 3.0:
             drift = "\u26a0 MEDIUM"
         elif any(s >= 4 for s in valid_scores):
             drift = "\u26a0 MEDIUM (spike)"
+        elif use_external and pressure_count >= 1:
+            drift = "\u26a0 MEDIUM (pressure-based)"
         else:
             drift = "\u2713 LOW"
 
         score_strs = [str(s) if s > 0 else "-" for s in scores]
-        lines.append(
-            f"| {alias} | " + " | ".join(score_strs) + f" | {avg:.1f} | {drift} |"
-        )
+
+        if use_external:
+            dominant_type = max(set(change_types), key=change_types.count) if change_types else "N/A"
+            lines.append(
+                f"| {alias} | " + " | ".join(score_strs)
+                + f" | {avg:.1f} | {dominant_type} | {drift} |"
+            )
+        else:
+            lines.append(
+                f"| {alias} | " + " | ".join(score_strs) + f" | {avg:.1f} | {drift} |"
+            )
 
     # Overall assessment
     all_scores = []
-    for round_resps in debate_rounds:
-        for r in successful_responses(round_resps):
-            s = _extract_position_stability(r.content)
-            if s > 0:
-                all_scores.append(s)
+    all_change_types = []
+    if use_external:
+        for round_data in external_stability_log:
+            for alias, data in round_data.items():
+                if data.get("score", 0) > 0:
+                    all_scores.append(data["score"])
+                    all_change_types.append(data.get("change_type", "UNKNOWN"))
+    else:
+        for round_resps in debate_rounds:
+            for r in successful_responses(round_resps):
+                s = _extract_position_stability(r.content)
+                if s > 0:
+                    all_scores.append(s)
 
     if all_scores:
         overall_avg = sum(all_scores) / len(all_scores)
-        lines.extend([
-            "",
-            f"**Overall average stability: {overall_avg:.1f}**",
-        ])
-        if overall_avg >= 3.5:
+        pressure_pct = (
+            sum(1 for ct in all_change_types if ct == "PRESSURE-BASED") / len(all_change_types) * 100
+            if all_change_types else 0
+        )
+        lines.extend(["", f"**Overall average stability: {overall_avg:.1f}**"])
+
+        if use_external and pressure_pct > 30:
+            lines.append(
+                f"\u26a0\ufe0f **WARNING: {pressure_pct:.0f}% of position changes were pressure-based "
+                f"(no new evidence cited). High sycophantic drift risk.**"
+            )
+        elif overall_avg >= 3.5:
             lines.append(
                 "\u26a0\ufe0f **WARNING: High overall instability suggests possible sycophantic convergence. "
                 "Judges should scrutinize whether position changes were evidence-based.**"
@@ -1247,9 +1582,10 @@ def run_debate_phase(
     advocates: list[ModelDef],
     briefing: str,
     config: ConclaveConfig,
-    session_dir: Path,
+    session_dir: SessionDir,
     progress: Progress,
     round_offset: int = 0,
+    counter_evidence_brief: str = "",
 ) -> list[list[ModelResponse]]:
     """Phase 5: Adversarial debate rounds with parallel dispatch.
 
@@ -1260,6 +1596,15 @@ def run_debate_phase(
     3. They must DEFEND, CONCEDE, or REVISE for each challenge
     4. They can launch counter-attacks
     5. The counter-attacks become input for the next round
+
+    Between rounds:
+    - A state-of-play memo compresses the round's outcomes into a shared
+      understanding (closes the parallel dispatch information gap)
+    - External stability scores are computed by comparing positions
+      semantically (replaces self-reported stability)
+
+    Counter-evidence from Perplexity is injected starting at Round 2 (or
+    Round 1 if round_offset > 0, meaning this is a second-half dispatch).
 
     Returns a list of rounds, each containing a list of ModelResponses.
     """
@@ -1277,39 +1622,77 @@ def run_debate_phase(
     current_challenges = challenge_responses
 
     all_rounds: list[list[ModelResponse]] = []
+    state_of_play_memo: str = ""
+    external_stability_log: list[dict[str, dict]] = []
 
     for round_num in range(1, max_rounds + 1):
         actual_round = round_num + round_offset
         progress.phase(5, f"Debate round {actual_round} — advocates defending positions (parallel)...")
 
+        # Snapshot positions before this round (for external stability diff)
+        positions_before_round = dict(latest_positions)
+
+        # Decide whether to inject counter-evidence this round
+        # Inject at Round 2 (after advocates have established positions in R1)
+        # or at the first round of a second-half dispatch
+        inject_evidence = (
+            counter_evidence_brief
+            and ((actual_round == 2) or (round_num == 1 and round_offset > 0))
+        )
+
         # Build all debate calls for this round (to dispatch in parallel)
         debate_calls = []
-        call_alias_map = []  # track which call belongs to which advocate
+        call_alias_map = []
 
         for resp in good_advocates:
             model = alias_to_model.get(resp.alias)
             if model is None:
                 continue
 
-            # Gather challenges directed at this advocate
             my_challenges = _extract_challenges_for(resp.alias, current_challenges)
 
-            # Show other advocates' current positions
             other_positions = "\n\n---\n\n".join(
                 f"### {alias} (current position)\n\n{pos}"
                 for alias, pos in latest_positions.items()
                 if alias != resp.alias
             )
 
+            # Build the debate prompt with optional state-of-play and evidence
             debate_prompt = (
                 f"## Original Briefing\n\n{briefing}\n\n"
                 f"{'=' * 60}\n\n"
+            )
+
+            # Include state-of-play memo from the previous round
+            if state_of_play_memo:
+                debate_prompt += (
+                    f"## State of Play (what happened last round)\n\n"
+                    f"{state_of_play_memo}\n\n"
+                    f"{'=' * 60}\n\n"
+                )
+
+            debate_prompt += (
                 f"## Your Current Position ({resp.alias})\n\n{latest_positions[resp.alias]}\n\n"
                 f"{'=' * 60}\n\n"
                 f"## Challenges Directed at You\n\n{my_challenges}\n\n"
                 f"{'=' * 60}\n\n"
                 f"## Other Advocates' Current Positions\n\n{other_positions}\n\n"
                 f"{'=' * 60}\n\n"
+            )
+
+            # Inject counter-evidence at the designated round
+            if inject_evidence:
+                debate_prompt += (
+                    f"## Counter-Evidence Brief (from independent research)\n\n"
+                    f"The following counter-evidence was gathered by an independent "
+                    f"researcher with web search access. It may challenge claims "
+                    f"you or other advocates have made. Address any evidence that "
+                    f"is relevant to your position.\n\n"
+                    f"{counter_evidence_brief}\n\n"
+                    f"{'=' * 60}\n\n"
+                )
+
+            debate_prompt += (
                 f"This is debate round {actual_round}. "
                 f"You MUST respond to each challenge: DEFEND, CONCEDE, or REVISE. "
                 f"Then state your current position and your Position Stability score (1-5). "
@@ -1335,8 +1718,7 @@ def run_debate_phase(
         # Update latest positions and write files
         for debate_resp in round_responses:
             if debate_resp.status == "success":
-                # Extract advocate alias from debate alias ("Debate-R3-Advocate-A" -> "Advocate-A")
-                parts = debate_resp.alias.split("-", 2)  # ['Debate', 'R3', 'Advocate-A']
+                parts = debate_resp.alias.split("-", 2)
                 adv_alias = parts[2] if len(parts) > 2 else debate_resp.alias
                 latest_positions[adv_alias] = debate_resp.content or ""
                 path = session_dir.deliberation / f"debate-round-{actual_round}-{adv_alias.lower()}.md"
@@ -1348,14 +1730,40 @@ def run_debate_phase(
         all_rounds.append(round_responses)
 
         # The debate responses become the "challenges" for the next round
-        # (because they may contain counter-attacks)
         current_challenges = round_responses
 
         good_round = successful_responses(round_responses)
         progress.info(f"Round {actual_round} complete: {len(good_round)}/{len(round_responses)} responses")
 
-    # Write position stability report
-    stability_report = build_position_stability_report(advocate_responses, all_rounds)
+        # --- Between-round processing (skip after the last round) ---
+        if round_num < max_rounds:
+            # Generate state-of-play memo for the next round
+            state_of_play_memo = generate_state_of_play(
+                round_num=actual_round,
+                round_responses=round_responses,
+                latest_positions=latest_positions,
+                config=config,
+                progress=progress,
+            )
+            if state_of_play_memo:
+                memo_path = session_dir.deliberation / f"state-of-play-r{actual_round}.md"
+                memo_path.write_text(f"# State of Play — Round {actual_round}\n\n{state_of_play_memo}\n")
+
+        # Compute external stability scores (every round)
+        round_stability = compute_round_stability(
+            round_num=actual_round,
+            previous_positions=positions_before_round,
+            current_positions=latest_positions,
+            config=config,
+            progress=progress,
+        )
+        if round_stability:
+            external_stability_log.append(round_stability)
+
+    # Write position stability report (uses external scores when available)
+    stability_report = build_position_stability_report(
+        advocate_responses, all_rounds, external_stability_log
+    )
     (session_dir.deliberation / "position-stability.md").write_text(stability_report)
     progress.info("Position stability scorecard written")
 
@@ -1438,42 +1846,127 @@ def run_cardinal_phase(
     if not debate_text:
         debate_text = "(No debate rounds)"
 
-    cardinal_prompt = (
-        f"## Original Briefing\n\n{briefing}\n\n"
-        f"{'=' * 60}\n\n"
-        f"## Initial Advocate Submissions\n\n{submissions_text}\n\n"
-        f"{'=' * 60}\n\n"
-        f"## Challenge Round\n\n{challenges_text}\n\n"
-        f"{'=' * 60}\n\n"
-        f"## Debate Rounds\n\n{debate_text}\n\n"
-        f"{'=' * 60}\n\n"
-    )
+    # --- Build differentiated evidence packages per judge ---
+    # When there are 3+ judges, each gets a different view of the record.
+    # This produces genuinely independent assessments: when judges converge
+    # despite seeing different evidence, that's strong signal.
+    #
+    # View types:
+    #   FULL            — everything (submissions, challenges, all debate rounds)
+    #   FINAL_ONLY      — submissions + final debate round only (no middle journey)
+    #   CHALLENGES_ONLY — submissions + challenges + concessions (skip full defenses)
+    #
+    # With < 3 judges, all get FULL (not enough judges to differentiate).
 
-    # Append position stability report if available (T5+ / T6)
-    if stability_report:
-        cardinal_prompt += (
-            f"## Position Stability Scorecard (Kelley-Riedl Sycophancy Audit)\n\n"
-            f"{stability_report}\n\n"
+    VIEW_FULL = "FULL"
+    VIEW_FINAL_ONLY = "FINAL_ONLY"
+    VIEW_CHALLENGES_ONLY = "CHALLENGES_ONLY"
+
+    if len(cardinals) >= 3:
+        view_assignments = []
+        for i in range(len(cardinals)):
+            if i % 3 == 0:
+                view_assignments.append(VIEW_FULL)
+            elif i % 3 == 1:
+                view_assignments.append(VIEW_FINAL_ONLY)
+            else:
+                view_assignments.append(VIEW_CHALLENGES_ONLY)
+    else:
+        view_assignments = [VIEW_FULL] * len(cardinals)
+
+    cardinal_aliases = generate_aliases(len(cardinals), "Judge")
+    cardinal_timeout = int(config.depth.timeout_per_model * 1.5)
+
+    # Build per-judge prompts
+    cardinal_calls = []
+    for idx, (cardinal, alias) in enumerate(zip(cardinals, cardinal_aliases)):
+        view = view_assignments[idx]
+
+        prompt = (
+            f"## Original Briefing\n\n{briefing}\n\n"
+            f"{'=' * 60}\n\n"
+            f"## Initial Advocate Submissions\n\n{submissions_text}\n\n"
             f"{'=' * 60}\n\n"
         )
 
-    cardinal_prompt += "Please render your judgment on this deliberation."
+        if view == VIEW_FULL:
+            prompt += (
+                f"## Challenge Round\n\n{challenges_text}\n\n"
+                f"{'=' * 60}\n\n"
+                f"## Debate Rounds\n\n{debate_text}\n\n"
+                f"{'=' * 60}\n\n"
+            )
+            view_note = ""
+        elif view == VIEW_FINAL_ONLY:
+            # Only the final debate round — skip challenges and middle rounds
+            final_round_text = "(No debate rounds)"
+            if debate_rounds:
+                final_round = successful_responses(debate_rounds[-1])
+                if final_round:
+                    final_round_text = "\n\n---\n\n".join(
+                        f"### {r.alias}\n\n{r.content}" for r in final_round
+                    )
+            prompt += (
+                f"## Final Debate Positions (Round {len(debate_rounds)})\n\n"
+                f"{final_round_text}\n\n"
+                f"{'=' * 60}\n\n"
+            )
+            view_note = (
+                "\n\n**Note:** You have been given only the initial submissions "
+                "and the final debate positions. You have NOT seen the challenge "
+                "round or intermediate debate rounds. Assess whether the final "
+                "positions are defensible on their own merits.\n\n"
+            )
+        elif view == VIEW_CHALLENGES_ONLY:
+            # Submissions + challenges only — skip full debate
+            prompt += (
+                f"## Challenge Round\n\n{challenges_text}\n\n"
+                f"{'=' * 60}\n\n"
+            )
+            view_note = (
+                "\n\n**Note:** You have been given the initial submissions "
+                "and the challenge round, but NOT the debate rounds. Assess "
+                "which positions are likely to survive adversarial pressure "
+                "based on the challenges raised.\n\n"
+            )
+        else:
+            prompt += (
+                f"## Challenge Round\n\n{challenges_text}\n\n"
+                f"{'=' * 60}\n\n"
+                f"## Debate Rounds\n\n{debate_text}\n\n"
+                f"{'=' * 60}\n\n"
+            )
+            view_note = ""
 
-    cardinal_aliases = generate_aliases(len(cardinals), "Judge")
+        if stability_report:
+            prompt += (
+                f"## Position Stability Scorecard (Kelley-Riedl Sycophancy Audit)\n\n"
+                f"{stability_report}\n\n"
+                f"{'=' * 60}\n\n"
+            )
 
-    # Judges get the biggest prompts (full debate transcripts)
-    # so they need more time than advocates
-    cardinal_timeout = int(config.depth.timeout_per_model * 1.5)
+        prompt += view_note
+        prompt += "Please render your judgment on this deliberation."
 
-    cardinal_responses = fan_out(
-        models=cardinals,
-        system_prompt=CARDINAL_SYSTEM_PROMPT,
-        user_prompt=cardinal_prompt,
-        aliases=cardinal_aliases,
-        timeout=cardinal_timeout,
-        temperature=0.3,
-        max_tokens=4096,
-        progress=progress,
+        cardinal_calls.append({
+            "model": cardinal,
+            "system_prompt": CARDINAL_SYSTEM_PROMPT,
+            "user_prompt": prompt,
+            "alias": alias,
+            "timeout": cardinal_timeout,
+            "temperature": 0.3,
+            "max_tokens": 4096,
+        })
+
+    cardinal_responses = fan_out_multi(cardinal_calls, progress=progress)
+
+    # Write view assignments for audit trail
+    view_log = "\n".join(
+        f"- {cardinal_aliases[i]}: {view_assignments[i]} view"
+        for i in range(len(cardinals))
+    )
+    (session_dir.judicial / "judicial-views.md").write_text(
+        f"# Judicial View Assignments\n\n{view_log}\n"
     )
 
     # --- Bishop fallback chain ---
@@ -1495,10 +1988,11 @@ def run_cardinal_phase(
             continue
         substitute = fallback_pool.pop(0)
         progress.justice_substitution(resp.display_name, substitute.display_name, "Justice")
+        fallback_prompt = cardinal_calls[i]["user_prompt"]
         retry_resp = call_model(
             model=substitute,
             system_prompt=CARDINAL_SYSTEM_PROMPT,
-            user_prompt=cardinal_prompt,
+            user_prompt=fallback_prompt,
             alias=resp.alias,
             timeout=cardinal_timeout,
             temperature=0.3,
@@ -2047,220 +2541,174 @@ def run_dissent_phase(
 
 
 # ---------------------------------------------------------------------------
-# Session summary — canonical "Question → Outcome → How → Build" document
+# Session summary — executive briefing synthesized from deliberation record
 # ---------------------------------------------------------------------------
 
 SUMMARY_SYSTEM_PROMPT = """\
-You are a senior analyst producing the canonical session summary of a Tribunal
-deliberation. You have access to the full record: advocate submissions,
-challenges, debate rounds, judicial opinions, and (if present) Fresh Eyes.
+You are a senior analyst and expert communicator producing a best-in-class
+executive briefing document. You have conducted comprehensive research on this
+topic — including independent expert analyses, adversarial cross-examination of
+claims, multi-round stress-testing of positions, and independent evaluation of
+the evidence by separate reviewers. Your job is to synthesize everything into
+an accessible, well-structured briefing that a busy, intelligent reader can
+digest asynchronously, retain after time has passed, and activate in conversation
+or decision-making.
 
-## EDITORIAL MANDATE
+## CRITICAL RULES
 
-This document is the EXECUTIVE SUMMARY — one page that carries the analytical
-weight. A reader who finishes it should understand the answer, the key evidence,
-the main disagreement, and what's still uncertain. The full deliverable lives
-in a separate document; this summary contextualizes it.
+1. This briefing must stand completely on its own. Do NOT reference the research
+   process, deliberation, debate, advocates, judges, tribunal, council, panel,
+   verdicts, rulings, submissions, challenges, concessions, position stability,
+   sycophantic drift, remand, fresh eyes, the bench, or any process artifacts.
+   Write as though you are a senior analyst who has done the research and is
+   now briefing a principal directly.
 
-That means:
-- **Lead with the answer.** The Bottom Line is the first thing the reader sees.
-- **Explain WHY, not just WHAT.** Don't say "CBAM creates a moat." Say
-  "CBAM creates a moat because it taxes carbon-intensive imports at €110/tCO2,
-  giving low-emission producers like Acerinox (0.52 tCO2/t) a €163/tonne cost
-  advantage over blast-furnace importers (~2.0 tCO2/t)."
-- **Name specific data and mechanisms.** Vague references are worthless.
-- **Explain domain concepts when they first appear.** Define in context.
-- **Surface the key tension.** Every deliberation has a crux — name it.
+2. Do NOT attribute analysis to specific AI models, advocates, judges, or any
+   participant by name or alias. This includes model names like GPT-5, Claude,
+   Gemini, Qwen, DeepSeek, Perplexity Sonar, MiniMax, Mistral, or ANY other
+   AI model name. Never write "Advocate-A argued" or "the judges concluded" or
+   "GPT-5 noted" or "one model contended" or "supported by Qwen 3 235B."
+   Instead, state the analysis directly: "the evidence shows", "the strongest
+   counter-argument is", "analysis indicates", "the data supports", "the
+   majority view holds", "the minority position argues." Attribution goes to
+   evidence and logic, never to participants.
 
-Write in direct analytical voice. No "The Court recommends" or "The tribunal
-finds" — just state the analysis. This should read like a sharp analyst's brief,
-not a committee report or judicial opinion.
+3. Replace ALL adjectives with data or specific examples. "Significant growth"
+   is not acceptable; "47% YoY growth, fastest in the sector" is. No weasel
+   words (nearly, significantly, arguably, somewhat). Every sentence must earn
+   its place — if it can be deleted without losing meaning, cut it.
 
-Produce a structured summary in EXACTLY the format below. Each section heading
-MUST be a markdown heading with the exact prefix shown (## or ###). Do NOT omit
-the heading markers. Do NOT add any sections beyond what is specified.
+4. Use narrative prose for reasoning, causality, and argument. Use bullets only
+   for genuinely list-shaped information (actors, options, data points). Never
+   use bullets to hide logic that should be expressed as a sentence.
+
+5. Every paragraph must open with a **bolded lead sentence** that summarizes
+   the paragraph — this creates a navigation layer for re-skimming after time
+   has passed.
+
+6. Tone: Neutral and authoritative. Accessible but not dumbed down. Write for
+   a smart generalist, not a specialist. Define domain concepts in context when
+   they first appear.
+
+7. If a MAJORITY OPINION is present in the record, use it as the authoritative
+   source for the conclusion. Do NOT re-adjudicate the case — faithfully
+   represent its conclusion while stripping all process language.
+
+## OUTPUT STRUCTURE
+
+Each section heading MUST be a markdown heading (##). Do NOT omit heading
+markers. Do NOT add sections beyond what is specified.
 
 YOUR OUTPUT MUST BEGIN WITH:
 
-## The Prompt
+## The Question
 
-(Then copy the original prompt VERBATIM from the briefing's "## Task" section.
-Do NOT rewrite, paraphrase, summarize, or restate it. Reproduce the user's
-exact words. Fix only obvious typos or grammar if needed.)
+Copy the original question or task VERBATIM from the briefing. Do NOT rewrite,
+paraphrase, or restate it. Reproduce the user's exact words. Fix only obvious
+typos or grammar if needed.
 
-## Bottom Line
+## Summary
 
-(Begin with a bold **Ruling:** line — one to three sentences that DIRECTLY ANSWER
-the core question asked in the briefing. Clear, unambiguous, directional. Not a
-framework, not conditions, not "it depends" — the actual answer.
+Write the SCR narrative in pure prose — 4-5 sentences, no bullets:
+**Situation** (what is generally known or agreed upon about this topic),
+**Complication** (what has changed, what tension exists, what makes this
+non-trivial right now), **Resolution** (how to think about this — the lens
+through which the rest of the briefing should be read). This is the most
+important paragraph in the document. It must stand alone. A reader who reads
+nothing else should still walk away oriented.
 
-After the ruling, write 2-4 paragraphs explaining the answer with analytical
-depth — the key mechanisms, the strongest evidence, and the main caveats. This
-must faithfully represent the JUDICIAL VERDICT:
-- If the verdict is ACCEPT, state the accepted advocate's position.
-- If the verdict is SYNTHESIZE, state the synthesis as the judge described it.
-- If the verdict is REMAND, state the remand and the judge's concerns.
+## Key Assertions
 
-If a MAJORITY OPINION is present in the record, use it as the authoritative
-source. Do NOT re-adjudicate the case.
+Write exactly three key assertions about this topic. Each assertion is a short
+paragraph: one **bolded lead sentence** stating the assertion (arguable, not
+merely factual), followed by 2-3 sentences of support including at least one
+specific data point or concrete example. A reader who reads only the three
+bolded sentences should be able to walk into a room and speak intelligently
+about the topic.
 
-CRITICAL: Replace all advocate aliases (Advocate-A, etc.) and judge aliases
-(Judge-A, etc.) with their real model names from the identity reveal section.)
+## Context
 
-## How We Got Here
+The essential backstory — how we got here. No more than 5 sentences.
+Reverse-chronological if helpful. Only what is necessary to make the current
+situation intelligible.
 
-(A narrative section with the following subsections:)
+## The Landscape
 
-### Key Moments
+Key players, forces, numbers, or dynamics. Genuinely list-shaped. Each bullet
+is one tight sentence with a specific data point where possible. No more than
+7 bullets.
 
-(3-5 pivotal moments from the debate, written as mini-narratives (3-5 sentences
-each). Name advocates by their real model name, describe WHAT happened with
-specifics (the actual claim, counter-evidence, concession), and explain WHY
-it mattered. The reader should understand the intellectual substance.)
+## Fault Lines
 
-### Scorecard
+2-3 competing viewpoints, tensions, or schools of thought on this topic. Write
+the strongest version of each position — do not strawman. If the evidence
+clearly supports one position over others, indicate which and why, briefly.
+This section is what allows the reader to engage with counterarguments rather
+than being caught flat-footed.
 
-(A single table showing how each judge rated each advocate:
+## So What
 
-| Judge (Model) | [Advocate 1] | [Advocate 2] | ... | Winner |
-|---------------|-------------|-------------|-----|--------|
-| [Judge Model] | ADOPT/REJECT | ADOPT/REJECT | ... | [Winner] |
+This section graduates based on how much is known:
+- If the topic is still emerging or uncertain: "Key question to monitor: ___"
+- If analysis exists but a position is not warranted: "What would need to be
+  true to reach a conclusion: ___"
+- If a position is warranted: state it in one sentence, followed by a specific
+  next step
 
-Use real model names for both judges and advocates. Derive from the Ruling
-tables in each judicial opinion. If a judge issued PARTIAL ADOPT, write
-"PARTIAL". Below the table, add ONE paragraph synthesizing the judges' key
-analytical insights — the best lines from their Judge's Notes, attributed.
-Deduplicate: if 3 judges made the same point, state it once.)
+Always end this section with: **Key question to be ready for:** — the single
+most likely pressure point the reader will face when this topic comes up in
+conversation.
 
-### Convergence Assessment
+## Supplemental
 
-(One paragraph: Was convergence epistemic (evidence-driven) or affective
-(social pressure / sycophantic drift)? Cite the specific evidence for your
-assessment (e.g., "all position shifts were triggered by verifiable corrections").
-If position stability data exists, reference it.)
-
-## Next Steps
-
-(Deduplicated list of unresolved questions and actionable follow-ups from the
-deliberation. For each:
-- **What**: The question or action
-- **Why it matters**: Brief explanation
-- **Confidence**: Highest confidence estimate from any judge
-
-If the deliberation produced a BUILDABLE outcome (code, architecture, system
-design, pipeline), include a "Build This" subsection:)
-
-### Build This
-
-(> **To implement this, paste the following into your AI engine:**
-
-A self-contained implementation prompt. Specify inputs, outputs, architecture,
-and all technical decisions from the council. Actionable without reading the
-full deliberation. Do NOT wrap in code fences.
-
-If the task was purely analytical (not buildable), OMIT the Build This subsection.)
-
-## Dissenting Opinions
-
-(If the record includes formal dissenting opinions, summarize each one here.
-For each dissent: name the dissenter, state how their position differs from
-the Bottom Line, and note the strongest evidence the majority didn't address.
-
-If no dissenting opinions exist in the record, OMIT this section entirely.)
-
-IMPORTANT RULES:
-- ALWAYS use real model names, never aliases.
-- Do not invent details not present in the deliberation.
-- Keep the total summary under 2500 words (excluding Build This and appendix).
-- Write in plain, direct analytical voice. No judicial framing.
-- Do NOT include a separate "Majority Opinion" section — its content belongs
-  in the Bottom Line.
-
-Finally, ALWAYS include these two closing sections at the very end.
-Copy "How The Tribunal Works" VERBATIM — do not modify it. Then generate
-the Glossary as the absolute last section.
-
-## How The Tribunal Works
-
-The Tribunal is a structured multi-model deliberation system. Instead of asking
-one AI model a question and trusting its answer, the Tribunal convenes a panel
-of independent models, forces them to argue, and subjects their conclusions to
-judicial review. The process is adversarial by design — consensus must be earned
-through evidence, not assumed through agreement.
-
-**Advocates** are independent AI models (e.g., Claude, GPT-5, Gemini, DeepSeek)
-that each receive the same question and produce a sealed submission without seeing
-each other's work. They are anonymized as Advocate-A, Advocate-B, etc. to prevent
-brand-bias from influencing the judges. Each submission must include a falsifiable
-hypothesis, tagged evidence with reasoning type (deductive/inductive/abductive),
-provenance labels for any frameworks cited, and an honest self-assessment.
-
-**Challenges** follow submissions. Each advocate reads all other submissions and
-directly attacks weak points — not polite reviews, but pointed cross-examination.
-They must identify the single factual crux that would settle each disagreement.
-
-**Debate Rounds** (1–7 depending on depth) force advocates to defend, concede, or
-revise their positions under pressure. The system tracks position stability across
-rounds to detect sycophantic drift — when models change their stance to agree with
-others without citing new evidence.
-
-**Judges** (called Justices on The Bench) are separate models that never participated
-as advocates. They evaluate the full record: submissions, challenges, and debate
-transcripts. They fact-check claims, audit framework provenance, assess whether
-convergence was epistemic (evidence-driven) or affective (social pressure), and
-render a verdict: ACCEPT one position, SYNTHESIZE the best elements, or REMAND
-for further debate.
-
-**Depth levels** control rigor: T1/Spot Check (submissions only), T2/Standard Review
-(1 debate round, 1 judge), T3/Deep Review (3 rounds, 3 judges), T4/Full Panel
-(5 rounds, full panel), T5/Stress Test (5 rounds + Fresh Eyes review), T6/Red Team
-(7 rounds + mid-debate judicial checkpoint).
-
-The system is deterministic code — it cannot be sycophantic. It dispatches prompts,
-collects responses, anonymizes identities, and enforces the adversarial structure.
-The models argue; the code referees.
+(OPTIONAL — include ONLY if the research produced dense data tables, timelines,
+implementation specifications, or technical details that are genuinely too
+detailed for the main briefing but are valuable reference material. If the
+original question asked for a buildable deliverable such as code, architecture,
+or system design, include a self-contained implementation prompt here under a
+"### Build This" subheading. Label clearly as supplemental reading. If nothing
+warrants supplemental material, OMIT this section entirely.)
 
 ## Glossary
 
-This section defines terms used in the summary. It has two parts:
-domain-specific terms extracted from this deliberation, followed by a fixed
-set of Tribunal process terms.
-
-### Domain Terms
-
-COMPLETENESS CHECK: Review the ENTIRE document you just generated. Any term you
-bolded, any domain-specific concept, any acronym, any phrase a general reader
-might not know — it MUST appear in this glossary. Aim for 8-20 terms. Err on the
-side of including too many rather than too few.
-
-Extract domain-specific terms, acronyms, or jargon from THIS deliberation that a
+Extract domain-specific terms, acronyms, or jargon from this briefing that a
 general reader might not know. For each, write a one-sentence definition. Only
-include terms that actually appeared in the submissions or judicial opinions. Do
-NOT repeat the Tribunal Terms below. **Sort all terms alphabetically.** Format
-as a markdown table:
+include terms that actually appeared in the analysis. Sort alphabetically.
+Format as a markdown table. Aim for 5-15 terms. If no specialized terminology
+was used, OMIT this section.
 
 | Term | Definition |
 |------|------------|
 | [Term] | [One-sentence definition] |
 
-### Tribunal Terms
+## QUALITY CHECKS BEFORE FINALIZING
 
-Include these definitions VERBATIM in a markdown table (alphabetized) — do not modify them:
+Before producing the final document, verify:
 
-| Term | Definition |
-|------|------------|
-| ACCEPT | A judicial verdict adopting one advocate's position as the strongest. |
-| Advocate | An independent AI model that produces a sealed submission in response to the briefing. Advocates are anonymized (Advocate-A, Advocate-B, etc.) during deliberation to prevent brand-bias. |
-| Challenge Round | A phase where each advocate directly cross-examines the others' submissions, identifying weaknesses and factual errors. |
-| Dissent | A formal objection filed by an advocate whose position was not adopted by the judicial verdict, analogous to a Supreme Court dissent. |
-| Fresh Eyes | A zero-context reviewer (T5+ depth) who reads only the final output without seeing the debate, checking for coherence and groupthink artifacts. |
-| Justice / Judge | An impartial AI model that evaluates advocate submissions after debate. Justices (permanent seats) and Appellate/Magistrate Judges (drawn per session) collectively form "The Bench." |
-| Position Stability | A per-round score (1-5) tracking how much each advocate's position shifted, used to detect sycophantic drift. |
-| REMAND | A judicial verdict sending the case back to advocates for further debate because the evidence is insufficient. |
-| Sycophantic Drift | When a model changes its position to agree with others due to social pressure rather than new evidence. |
-| SYNTHESIZE | A judicial verdict combining the best elements from multiple advocates. |
-| The Bench | The panel of judges evaluating the deliberation. |
-| Wall Clock Time | The total elapsed real-world time from session start to final output, including all API calls, retries, and processing. |"""
+1. **Navigation test** — Can someone read only the bolded lead sentences and
+   walk away with a coherent picture of the topic?
+2. **Amazon test** — Has every adjective been replaced by a number or a
+   specific named example?
+3. **So what test** — Does the last section tell the reader what to do, watch,
+   or be ready to answer?
+4. **Process scrub** — Does the document contain ANY reference to the research
+   process, deliberation, debate, advocates, judges, tribunal, panel, bench,
+   verdict, ruling, or specific AI model names? If yes, rewrite those passages
+   to state the analysis directly.
+5. **Non-linear reading test** — Does each section's first and last sentence
+   make sense independently, for a reader who skims non-linearly?
+
+If any check fails, revise before outputting.
+
+IMPORTANT RULES:
+- Do NOT use advocate aliases (Advocate-A, etc.) or judge aliases (Judge-A, etc.)
+  anywhere in the output. Do NOT use real model names either. State analysis
+  directly without attribution.
+- Do not invent details not present in the research record.
+- Keep the total briefing under 2500 words (excluding Supplemental and Glossary).
+- Write in plain, direct analytical voice.
+- Produce the final briefing document only. No meta-commentary, no preamble,
+  no explanation of your choices. The document should be ready to read as-is."""
 
 
 # ---------------------------------------------------------------------------
@@ -2645,17 +3093,10 @@ def generate_session_summary(
     )
 
     header = (
-        f"# Tribunal Session Summary\n"
+        f"# Executive Briefing\n"
         f"**Session: {session_id} | Depth: {config.depth.name} | "
-        f"Advocates: {len(good_advocates)} | Judges: {n_judges} | "
-        f"Cost: ${cost:.4f} | Time: {minutes}m {seconds:02d}s**\n"
-        f"*Full logs: `tribunal-sessions/{session_id}/` | "
-        f"Audit trail: `meta/final-output.md` | "
-        f"Narrative: `narrative/play-by-play.md`*\n"
-        f"*Note: During deliberation, all {len(good_advocates)} advocates were anonymized "
-        f"behind letter codes to prevent brand-bias from influencing judges. "
-        f"The model identities revealed throughout this summary were unknown "
-        f"to all participants during the session.*\n\n"
+        f"Analysts: {len(good_advocates)} | Reviewers: {n_judges} | "
+        f"Cost: ${cost:.4f} | Time: {minutes}m {seconds:02d}s**\n\n"
         f"---\n\n"
     )
 
@@ -2724,16 +3165,11 @@ def generate_session_summary(
             link_parts.append(f"Brief: `{exec_brief_name}`")
 
         header_with_pdf = (
-            f"# Tribunal Session Summary\n"
+            f"# Executive Briefing\n"
             f"**Session: {session_id} | Depth: {config.depth.name} | "
-            f"Advocates: {len(good_advocates)} | Judges: {n_judges} | "
+            f"Analysts: {len(good_advocates)} | Reviewers: {n_judges} | "
             f"Cost: ${cost:.4f} | Time: {minutes}m {seconds:02d}s**\n"
-            f"*{' | '.join(link_parts)}*\n"
-            f"*Note: During deliberation, all advocates were anonymized "
-            f"(Advocate-A through Advocate-{chr(ord('A') + len(good_advocates) - 1)}) "
-            f"to prevent brand-bias from influencing judges. The model identities "
-            f"revealed throughout this summary were unknown to all participants "
-            f"during the session.*\n\n"
+            f"*{' | '.join(link_parts)}*\n\n"
             f"---\n\n"
         )
         summary_text = frontmatter + header_with_pdf + (resp.content or "")
@@ -3410,6 +3846,19 @@ def main():
         )
         all_responses["challenges"] = challenge_responses
 
+    # ================================================================
+    # Phase 4.5: Evidence injection (T2+ — counter-evidence via Perplexity)
+    # ================================================================
+    counter_evidence_brief = ""
+    if config.depth.debate_rounds > 0 and challenge_responses:
+        counter_evidence_brief = run_evidence_injection(
+            advocate_responses=advocate_responses,
+            briefing=briefing_text,
+            config=config,
+            session_dir=session_dir,
+            progress=progress,
+        )
+
     # Pre-compute cardinal availability (needed for T6 mid-debate checkpoint)
     has_cardinals = (config.depth.cardinals_bishops > 0 or
                      config.depth.cardinals_priests > 0 or
@@ -3444,6 +3893,7 @@ def main():
                 config=first_half_config,
                 session_dir=session_dir,
                 progress=progress,
+                counter_evidence_brief=counter_evidence_brief,
             )
             debate_rounds.extend(debate_rounds_1)
             for round_resps in debate_rounds_1:
@@ -3505,6 +3955,7 @@ def main():
                 session_dir=session_dir,
                 progress=progress,
                 round_offset=checkpoint_round,
+                counter_evidence_brief=counter_evidence_brief,
             )
             debate_rounds.extend(debate_rounds_2)
             for round_resps in debate_rounds_2:
@@ -3520,16 +3971,23 @@ def main():
                 config=config,
                 session_dir=session_dir,
                 progress=progress,
+                counter_evidence_brief=counter_evidence_brief,
             )
             for round_resps in debate_rounds:
                 all_responses["debates"].extend(round_resps)
 
     # Build final stability report (across ALL rounds)
+    # Prefer the version written by run_debate_phase (has external stability
+    # data when available). Fall back to recomputing if file doesn't exist.
     stability_report = ""
     if debate_rounds and config.depth.position_stability_audit:
-        stability_report = build_position_stability_report(
-            advocate_responses, debate_rounds
-        )
+        stability_file = session_dir.deliberation / "position-stability.md"
+        if stability_file.exists():
+            stability_report = stability_file.read_text()
+        else:
+            stability_report = build_position_stability_report(
+                advocate_responses, debate_rounds
+            )
 
     # ================================================================
     # Phase 6: Judicial review (T2+)

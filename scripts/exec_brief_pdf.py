@@ -239,7 +239,7 @@ class ExecBriefTemplate(BaseDocTemplate):
         canvas.setFont('Helvetica-Bold', 6.5)
         canvas.setFillColor(NAVY)
         canvas.drawString(LEFT_MARGIN, PAGE_H - TOP_MARGIN + 14,
-                          "THE TRIBUNAL \u2014 EXECUTIVE BRIEF")
+                          "EXECUTIVE BRIEF")
 
         session_id = self.session_meta.get("session_id", "")
         if session_id:
@@ -595,27 +595,41 @@ def _build_brief_story(parsed, styles):
         ))
 
     # ==================================================================
-    # 2. RULING
+    # 2. SUMMARY / RULING
     # ==================================================================
-    story.append(Paragraph("Ruling", styles['section']))
-    story.append(AccentBar(color=ACCENT))
-    story.append(Spacer(1, 4))
+    # Detect new executive briefing format
+    is_briefing_format = bool(parsed.get("summary_paragraph") or parsed.get("key_assertions"))
 
-    ruling = _extract_ruling_line(parsed["recommended_outcome"])
-    if ruling:
-        story.append(RulingBox(
-            _md_inline_to_xml(ruling),
-            CONTENT_W, styles['ruling'], LIGHT_GRAY, ACCENT,
-        ))
+    if is_briefing_format and parsed.get("summary_paragraph"):
+        story.append(Paragraph("Summary", styles['section']))
+        story.append(AccentBar(color=ACCENT))
+        story.append(Spacer(1, 4))
+        # Render the SCR summary paragraph
+        summary_text = _strip_model_attribution(parsed["summary_paragraph"].strip().replace("\n", " "))
+        if summary_text:
+            story.append(Paragraph(_md_inline_to_xml(summary_text), styles['body']))
         story.append(Spacer(1, 6))
+    else:
+        story.append(Paragraph("Ruling", styles['section']))
+        story.append(AccentBar(color=ACCENT))
+        story.append(Spacer(1, 4))
+        ruling = _extract_ruling_line(parsed["recommended_outcome"])
+        if ruling:
+            story.append(RulingBox(
+                _md_inline_to_xml(ruling),
+                CONTENT_W, styles['ruling'], LIGHT_GRAY, ACCENT,
+            ))
+            story.append(Spacer(1, 6))
 
     # ==================================================================
-    # 3. WHY — the analytical reasoning (the meat)
+    # 3. KEY ASSERTIONS (new format) or WHY (legacy format)
     # ==================================================================
-    analysis_paras = _extract_analysis_paragraphs(parsed["recommended_outcome"], max_paras=3)
-
-    # Also pull numbered evidence points (the synthesis elements)
-    evidence_points = _extract_key_evidence(parsed["recommended_outcome"])
+    if is_briefing_format and parsed.get("key_assertions"):
+        analysis_paras = []
+        evidence_points = []
+    else:
+        analysis_paras = _extract_analysis_paragraphs(parsed["recommended_outcome"], max_paras=3)
+        evidence_points = _extract_key_evidence(parsed["recommended_outcome"])
 
     if analysis_paras or evidence_points:
         story.append(Paragraph("Why This Is the Answer", styles['section']))
@@ -637,9 +651,49 @@ def _build_brief_story(parsed, styles):
         story.append(Spacer(1, 2))
 
     # ==================================================================
-    # 4. KEY RISKS & CAVEATS
+    # 3b. KEY ASSERTIONS (new briefing format)
     # ==================================================================
-    risks = _extract_risks_and_caveats(parsed)
+    if is_briefing_format and parsed.get("key_assertions"):
+        story.append(Paragraph("Key Assertions", styles['section']))
+        story.append(AccentBar(color=ACCENT2))
+        story.append(Spacer(1, 4))
+
+        assertions_text = parsed["key_assertions"]
+        for para in assertions_text.strip().split("\n\n"):
+            para = para.strip()
+            if not para:
+                continue
+            cleaned = _strip_model_attribution(para.replace("\n", " "))
+            if cleaned and len(cleaned) > 20:
+                story.append(Paragraph(_md_inline_to_xml(cleaned), styles['body']))
+
+    # ==================================================================
+    # 3c. FAULT LINES (new briefing format — replaces KEY RISKS)
+    # ==================================================================
+    if is_briefing_format and parsed.get("fault_lines"):
+        story.append(Paragraph("Fault Lines", styles['section']))
+        story.append(AccentBar(color=ACCENT))
+        story.append(Spacer(1, 4))
+
+        fl_text = parsed["fault_lines"]
+        for para in fl_text.strip().split("\n\n"):
+            para = para.strip()
+            if not para:
+                continue
+            cleaned = _strip_model_attribution(para.replace("\n", " "))
+            if cleaned:
+                if len(cleaned) > 220:
+                    last_period = cleaned[:220].rfind(". ")
+                    if last_period > 110:
+                        cleaned = cleaned[:last_period + 1]
+                    else:
+                        cleaned = cleaned[:217] + "..."
+                story.append(Paragraph(_md_inline_to_xml(cleaned), styles['body']))
+
+    # ==================================================================
+    # 4. KEY RISKS & CAVEATS (legacy format only)
+    # ==================================================================
+    risks = _extract_risks_and_caveats(parsed) if not is_briefing_format else []
     if risks:
         story.append(Paragraph("Key Risks", styles['section']))
         story.append(AccentBar(color=ACCENT))
