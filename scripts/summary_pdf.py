@@ -963,6 +963,10 @@ def generate_summary_pdf(md_path, output_path=None, briefing_name=None):
         bottomMargin=BOTTOM_MARGIN,
     )
 
+    # If no explicit name passed, check YAML frontmatter
+    if not briefing_name:
+        briefing_name = parsed.get("header_meta", {}).get("briefing_name")
+
     styles = build_styles()
     story = _build_story(parsed, styles, briefing_name=briefing_name)
     doc.build(story)

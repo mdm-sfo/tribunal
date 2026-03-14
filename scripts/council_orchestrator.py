@@ -2671,15 +2671,16 @@ warrants supplemental material, OMIT this section entirely.)
 
 ## Glossary
 
-Extract domain-specific terms, acronyms, or jargon from this briefing that a
-general reader might not know. For each, write a one-sentence definition. Only
-include terms that actually appeared in the analysis. Sort alphabetically.
-Format as a markdown table. Aim for 5-15 terms. If no specialized terminology
-was used, OMIT this section.
+Include a glossary of domain-specific terms that a smart generalist would NOT
+already know. Skip common business terms (e.g. "ROI", "capex", "revenue") and
+only include genuinely specialized jargon, technical acronyms, or industry-
+specific concepts that require insider knowledge. If a term was defined in
+context in the briefing body, you can still include it here for quick reference.
+Sort alphabetically. Format as a markdown table. Aim for 5-12 terms.
 
 | Term | Definition |
 |------|------------|
-| [Term] | [One-sentence definition] |
+| [Term] | [One-sentence definition accessible to a non-specialist] |
 
 ## QUALITY CHECKS BEFORE FINALIZING
 
@@ -3073,6 +3074,9 @@ def generate_session_summary(
     _adv_names = [a.display_name for a in good_advocates] if good_advocates else []
     _judge_names = [j.display_name for j in good_cardinals] if good_cardinals else []
 
+    # Pick up briefing name from environment (set by dashboard submit)
+    briefing_name = os.environ.get("TRIBUNAL_BRIEFING_NAME", "").strip()
+
     # YAML frontmatter
     frontmatter = (
         f"---\n"
@@ -3086,6 +3090,10 @@ def generate_session_summary(
         f"time: {minutes}m {seconds:02d}s\n"
         f"status: completed\n"
         f"tags: [{', '.join(_slug_parts)}]\n"
+    )
+    if briefing_name:
+        frontmatter += f"briefing_name: {briefing_name}\n"
+    frontmatter += (
         f"models:\n"
         f"  advocates: [{', '.join(_adv_names)}]\n"
         f"  judges: [{', '.join(_judge_names)}]\n"
@@ -3119,7 +3127,7 @@ def generate_session_summary(
         from summary_pdf import generate_summary_pdf
         md_path = str(session_dir / summary_md_name)
         pdf_path = str(session_dir / summary_pdf_name)
-        generate_summary_pdf(md_path, pdf_path)
+        generate_summary_pdf(md_path, pdf_path, briefing_name=briefing_name or None)
         pdf_generated = True
         # Symlink legacy name
         legacy_pdf = session_dir / "session-summary.pdf"
