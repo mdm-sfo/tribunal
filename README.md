@@ -105,6 +105,10 @@ When fewer frontier keys are available than the depth requires, the panel is fil
 
 All judges run on Together AI or Cerebras. No additional keys required beyond `TOGETHER_API_KEY`. Adding `CEREBRAS_API_KEY` and `MISTRAL_API_KEY` expands the available bench.
 
+<p align="center">
+  <img src="screenshots/CleanShot 2026-03-19 at 09.04.54@2x.png" alt="Demo" width="600">
+</p>
+
 ## Environment Variables
 
 | Variable | Required | Description |
