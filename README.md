@@ -7,6 +7,10 @@ Instead of asking one model and trusting whatever comes back, it assigns the que
 
 The orchestrator is deterministic Python. It dispatches, anonymizes, and routes, but never opinionates.
 
+<p align="center">
+  <img src="screenshots/CleanShot 2026-03-19 at 05.42.48@2x.png" alt="Demo" width="600">
+</p>
+
 ## How It Works
 
 The Tribunal is a structured multi-model deliberation system. Instead of asking one AI model a question and trusting its answer, the Tribunal convenes a panel of independent models, forces them to argue, and subjects their conclusions to judicial review. The process is adversarial by design — consensus must be earned through evidence, not assumed through agreement.
